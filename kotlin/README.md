@@ -30,6 +30,7 @@ script.
 
 `GuestSession` owns the single `TerminalSession`. It sets `TMPDIR` to the app
 cache, passes `stub_exe=`, and starts the engine with `--inherit`, so UML's fd
-console is the Termux pty. `GuestService` is a foreground service so the guest
+console is the Termux pty. The image's `/sbin/init` is systemd; the console
+getty autologs in root. `GuestService` is a foreground service so the guest
 survives the Activity going away; a finished session (shell exit or poweroff)
 stops it.

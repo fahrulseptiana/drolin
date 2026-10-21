@@ -119,16 +119,24 @@ guest alive when the Activity is not visible.
 
 ## Ubuntu image
 
-`images/build-ubuntu.sh` verifies the official base tarball, fixes absolute and
-dangling symlinks (mke2fs follows links while copying xattrs), installs a small
-`/init`, and populates an ext4 image with `mke2fs -d` without mounting it. The
+`images/build-ubuntu.sh` verifies the official base tarball, installs systemd
+into a chroot, configures a `getty@tty0` autologin, fixes absolute and dangling
+symlinks, and populates an ext4 image with `mke2fs -d` without mounting it. The
 image is compressed into the APK and expanded once into app data.
 
-The init mounts proc/sys/dev, prints `DROLIN_GUEST_OK`, and starts bash. When
-bash exits, it powers off. A kernel argument `drolin.poweroff=1` makes it power
-off immediately after the marker for automated checks. Ubuntu base has no
-systemd tools, so the image also carries `drolin-poweroff`, exposed as
-`poweroff` and `halt`.
+systemd is PID 1 (`/sbin/init`). It starts dbus, udev, logind, journald and the
+console getty. `/usr/local/bin/drolin-shell` runs bash and powers off when bash
+exits, so `exit` ends the UML process. `/usr/local/bin/drolin-marker` prints
+`DROLIN_GUEST_OK` and, with the `drolin.poweroff=1` kernel argument, powers off
+for automated checks. `/usr/sbin/drolin-poweroff` is exposed as `poweroff` and
+`halt`.
+
+The base tarball's systemd postinst calls `systemd-machine-id-setup`, which
+reopens `/etc/machine-id` through `/proc/self/fd`. A chroot build has no
+`/proc`, so the script seeds a machine-id and neutralises that one helper
+before `dpkg --configure -a`. The device nodes needed by apt are empty regular
+files; devtmpfs replaces them at boot, and they keep systemd's `/dev/null`
+generator masks resolvable for mke2fs.
 
 ## What is deliberately absent
 

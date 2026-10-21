@@ -34,11 +34,12 @@ make kernel
 cargo run -p drolin-cli -- run \
   --kernel kernel/dist/linux-um-aarch64 \
   --rootfs images/dist/ubuntu-26.04.1-arm64.ext4 \
-  --init /init --marker DROLIN_GUEST_OK
+  --init /sbin/init --marker DROLIN_GUEST_OK
 ```
 
-Inside the guest you get a root bash shell. `uname -a` reports the pinned
-kernel version (`7.2.12-drolin`).
+systemd is PID 1. You get a root bash shell through an autologin on the UML
+console. `uname -a` reports the pinned kernel version (`7.2.12-drolin`), and
+`systemctl status` is available.
 
 ## Android
 

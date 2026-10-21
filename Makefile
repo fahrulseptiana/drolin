@@ -38,7 +38,7 @@ run-ubuntu: build
 	./target/release/drolin run \
 		--kernel kernel/dist/linux-um-$$(uname -m) \
 		--rootfs images/dist/ubuntu-26.04.1-arm64.ext4 \
-		--init /init \
+		--init /sbin/init \
 		--marker DROLIN_GUEST_OK
 
 clean:
