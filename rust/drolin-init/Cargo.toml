@@ -8,5 +8,9 @@ license.workspace = true
 name = "drolin-init"
 path = "src/main.rs"
 
+[[bin]]
+name = "drolin-poweroff"
+path = "src/poweroff.rs"
+
 [dependencies]
 libc = "0.2"

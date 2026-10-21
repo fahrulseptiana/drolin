@@ -15,6 +15,9 @@ test:
 guest:
 	./images/mkinitramfs.sh
 
+ubuntu:
+	./images/build-ubuntu.sh
+
 kernel:
 	./kernel/build.sh
 

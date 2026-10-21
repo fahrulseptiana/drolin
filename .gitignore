@@ -1,6 +1,8 @@
 /target
 /kernel/src
 /kernel/dist
+/kernel/build
+/kernel/build-android
 /kernel/*.tar.xz
 /images/dist
 /.gradle
@@ -20,3 +22,5 @@
 /kotlin/app/src/main/assets/*
 # fetched kernel source and cache
 /kernel/cache
+/images/cache
+/images/build
