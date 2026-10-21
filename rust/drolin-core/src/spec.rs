@@ -114,27 +114,33 @@ impl GuestSpec {
         let mut issues = Vec::new();
 
         if self.kernel.trim().is_empty() {
-            issues.push(Issue::error("kernel.missing", "a kernel binary is required".into()));
+            issues.push(Issue::error(
+                "kernel.missing",
+                "a kernel binary is required".into(),
+            ));
         }
         if !(32..=262_144).contains(&self.memory_mib) {
-            error(&mut issues, 
+            error(
+                &mut issues,
                 "memory.range",
                 format!("memory must be 32..=262144 MiB, got {}", self.memory_mib),
             );
         }
         if !(1..=64).contains(&self.cpus) {
-            error(&mut issues, 
+            error(
+                &mut issues,
                 "cpus.range",
                 format!("cpus must be 1..=64, got {}", self.cpus),
             );
         }
-        if let Some(init) = &self.init {
-            if !init.starts_with('/') {
-                error(&mut issues, 
-                    "init.absolute",
-                    format!("init must be an absolute guest path, got {init}"),
-                );
-            }
+        if let Some(init) = &self.init
+            && !init.starts_with('/')
+        {
+            error(
+                &mut issues,
+                "init.absolute",
+                format!("init must be an absolute guest path, got {init}"),
+            );
         }
         for (field, path) in [
             ("kernel", Some(&self.kernel)),
@@ -149,31 +155,39 @@ impl GuestSpec {
                 issues.push(Issue::error("path.empty", format!("{field} path is empty")));
             }
             if path.contains(',') {
-                error(&mut issues, 
+                error(
+                    &mut issues,
                     "path.comma",
-                    format!("{field} path contains a comma, which User-Mode Linux parses as a separator: {path}"),
+                    format!(
+                        "{field} path contains a comma, which User-Mode Linux parses as a separator: {path}"
+                    ),
                 );
             }
             if path.contains('\n') || path.contains('\0') {
-                error(&mut issues, 
+                error(
+                    &mut issues,
                     "path.control",
                     format!("{field} path contains a control character"),
                 );
             }
         }
         if self.initramfs.is_some() && self.rootfs.is_some() {
-            warn(&mut issues, 
+            warn(&mut issues,
                 "boot.rootfs-and-initramfs",
                 "both an initramfs and a root filesystem are set; the root filesystem is what the guest will mount".into(),
             );
         }
         if self.guest_page_size_kib == Some(0) {
-            issues.push(Issue::error("page_size.zero", "guest page size must be positive".into()));
+            issues.push(Issue::error(
+                "page_size.zero",
+                "guest page size must be positive".into(),
+            ));
         }
         if let (Some(guest), Some(host)) = (self.guest_page_size_kib, host) {
             let host_kib = host.page_size / 1024;
             if guest < host_kib {
-                error(&mut issues, 
+                error(
+                    &mut issues,
                     "page_size.too_small",
                     format!(
                         "guest pages are {guest} KiB but the host uses {host_kib} KiB; a guest page is a host mmap and cannot be smaller"
@@ -184,22 +198,27 @@ impl GuestSpec {
 
         for arg in &self.extra_args {
             if arg.trim().is_empty() {
-                issues.push(Issue::error("extra.empty", "an extra kernel argument is empty".into()));
+                issues.push(Issue::error(
+                    "extra.empty",
+                    "an extra kernel argument is empty".into(),
+                ));
                 continue;
             }
             if arg.contains('\0') || arg.contains('\n') {
-                error(&mut issues, 
+                error(
+                    &mut issues,
                     "extra.control",
                     format!("extra kernel argument contains a control character: {arg:?}"),
                 );
             }
-            if let Some(key) = arg.split('=').next() {
-                if is_reserved_key(key) {
-                    error(&mut issues, 
-                        "extra.reserved",
-                        format!("{key}= is owned by the planner; use the typed option instead"),
-                    );
-                }
+            if let Some(key) = arg.split('=').next()
+                && is_reserved_key(key)
+            {
+                error(
+                    &mut issues,
+                    "extra.reserved",
+                    format!("{key}= is owned by the planner; use the typed option instead"),
+                );
             }
         }
 
@@ -208,7 +227,8 @@ impl GuestSpec {
                 let _ = machine;
             }
             if matches!(host.arch, Arch::Other(_)) {
-                warn(&mut issues, 
+                warn(
+                    &mut issues,
                     "host.unknown-arch",
                     format!("unknown host architecture: {}", host.arch.as_str()),
                 );

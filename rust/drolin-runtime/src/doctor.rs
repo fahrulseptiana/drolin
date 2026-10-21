@@ -75,7 +75,11 @@ pub fn diagnose_on(spec: &GuestSpec, facts: &HostFacts) -> Diagnosis {
 
     checks.push(Check::pass(
         "host.arch",
-        format!("{} ({} KiB pages)", facts.arch.as_str(), facts.page_size / 1024),
+        format!(
+            "{} ({} KiB pages)",
+            facts.arch.as_str(),
+            facts.page_size / 1024
+        ),
     ));
 
     match elf::inspect(Path::new(&spec.kernel)) {
@@ -104,7 +108,11 @@ pub fn diagnose_on(spec: &GuestSpec, facts: &HostFacts) -> Diagnosis {
                     "{} MiB, {}-bit {} endian",
                     info.size_bytes / (1024 * 1024),
                     if info.is_64_bit { 64 } else { 32 },
-                    if info.is_little_endian { "little" } else { "big" }
+                    if info.is_little_endian {
+                        "little"
+                    } else {
+                        "big"
+                    }
                 ),
             ));
         }
@@ -167,9 +175,15 @@ fn check_input(checks: &mut Vec<Check>, name: &'static str, path: Option<&str>) 
     let Some(path) = path else { return };
     let path = Path::new(path);
     if !path.exists() {
-        checks.push(Check::fail(name, format!("{} does not exist", path.display())));
+        checks.push(Check::fail(
+            name,
+            format!("{} does not exist", path.display()),
+        ));
     } else if !path.is_file() {
-        checks.push(Check::fail(name, format!("{} is not a file", path.display())));
+        checks.push(Check::fail(
+            name,
+            format!("{} is not a file", path.display()),
+        ));
     } else {
         checks.push(Check::pass(name, format!("{} is readable", path.display())));
     }

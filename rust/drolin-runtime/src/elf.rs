@@ -104,7 +104,10 @@ mod tests {
     fn reads_an_aarch64_header() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("linux");
-        File::create(&path).unwrap().write_all(&fake_elf(183)).unwrap();
+        File::create(&path)
+            .unwrap()
+            .write_all(&fake_elf(183))
+            .unwrap();
         let info = inspect(&path).unwrap();
         assert_eq!(info.arch, Some(Arch::Aarch64));
         assert!(info.is_64_bit);
@@ -115,7 +118,10 @@ mod tests {
     fn reads_an_x86_64_header() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("linux");
-        File::create(&path).unwrap().write_all(&fake_elf(62)).unwrap();
+        File::create(&path)
+            .unwrap()
+            .write_all(&fake_elf(62))
+            .unwrap();
         assert_eq!(inspect(&path).unwrap().arch, Some(Arch::X86_64));
     }
 
@@ -123,7 +129,10 @@ mod tests {
     fn rejects_non_elf() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("linux");
-        File::create(&path).unwrap().write_all(b"#!/bin/sh\n").unwrap();
+        File::create(&path)
+            .unwrap()
+            .write_all(b"#!/bin/sh\n")
+            .unwrap();
         assert!(matches!(inspect(&path), Err(ElfError::NotElf { .. })));
     }
 

@@ -32,7 +32,10 @@ impl DataRoot {
         }
         if let Some(value) = env::var_os("HOME") {
             return Ok(Self::at(
-                PathBuf::from(value).join(".local").join("share").join("drolin"),
+                PathBuf::from(value)
+                    .join(".local")
+                    .join("share")
+                    .join("drolin"),
             ));
         }
         Err(PathError::NoHome)

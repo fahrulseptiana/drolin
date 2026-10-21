@@ -95,7 +95,12 @@ impl ImageStore {
         }
     }
 
-    fn copy_and_hash(&self, source: &Path, temp: &Path, image: &ImageRef) -> Result<(), ImageError> {
+    fn copy_and_hash(
+        &self,
+        source: &Path,
+        temp: &Path,
+        image: &ImageRef,
+    ) -> Result<(), ImageError> {
         let mut input = File::open(source).map_err(|error| ImageError::Io {
             path: source.to_owned(),
             source: error,

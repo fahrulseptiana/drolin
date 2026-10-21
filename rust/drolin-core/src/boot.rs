@@ -124,12 +124,7 @@ pub fn kernel_args(spec: &GuestSpec) -> Vec<KernelArg> {
             .iter()
             .map(|arg| KernelArg::flag(*arg)),
     );
-    args.extend(
-        spec.extra_args
-            .iter()
-            .cloned()
-            .map(KernelArg::flag),
-    );
+    args.extend(spec.extra_args.iter().cloned().map(KernelArg::flag));
     args
 }
 
@@ -211,14 +206,22 @@ mod tests {
     fn modes_emit_their_switch() {
         let mut spec = full_spec();
         spec.mode = BootMode::PtraceNoSysemu;
-        assert!(kernel_args(&spec).iter().any(|a| a.to_string() == "nosysemu"));
+        assert!(
+            kernel_args(&spec)
+                .iter()
+                .any(|a| a.to_string() == "nosysemu")
+        );
     }
 
     #[test]
     fn no_console_emits_no_con0() {
         let mut spec = full_spec();
         spec.console = ConsoleMode::None;
-        assert!(!kernel_args(&spec).iter().any(|a| a.to_string().starts_with("con0")));
+        assert!(
+            !kernel_args(&spec)
+                .iter()
+                .any(|a| a.to_string().starts_with("con0"))
+        );
     }
 
     #[test]

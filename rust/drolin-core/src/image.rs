@@ -105,7 +105,10 @@ impl ImageSet {
             }
         }
         for (index, image) in self.images.iter().enumerate() {
-            if self.images[..index].iter().any(|other| other.name == image.name) {
+            if self.images[..index]
+                .iter()
+                .any(|other| other.name == image.name)
+            {
                 problems.push(format!("duplicate image name {:?}", image.name));
             }
         }

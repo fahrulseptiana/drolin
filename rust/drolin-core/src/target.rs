@@ -85,10 +85,7 @@ mod tests {
         assert_eq!(Arch::from_machine_name("arm64"), Arch::Aarch64);
         assert_eq!(Arch::from_machine_name("aarch64"), Arch::Aarch64);
         assert_eq!(Arch::from_machine_name("amd64"), Arch::X86_64);
-        assert_eq!(
-            Arch::from_machine_name("mips"),
-            Arch::Other("mips".into())
-        );
+        assert_eq!(Arch::from_machine_name("mips"), Arch::Other("mips".into()));
     }
 
     #[test]
