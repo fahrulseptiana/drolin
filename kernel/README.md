@@ -22,3 +22,15 @@ without a second source tree.
 
 The Rust engine does not assume either architecture: it probes the ELF header
 and validates it against the host at runtime.
+
+## Android
+
+`build-android.sh` produces the same guest for an app. It links statically
+against the NDK sysroot and bionic; a glibc kernel dies under Android's zygote
+seccomp filter before it can print anything.
+
+```sh
+NDK=/path/to/ndk ./build-android.sh
+```
+
+Outputs `dist/linux-um-aarch64` and `dist/stub_exe-aarch64`.

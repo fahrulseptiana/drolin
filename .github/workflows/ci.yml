@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  guest:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - name: build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld llvm flex bison bc libelf-dev libssl-dev \
+            xz-utils e2fsprogs python3 gzip
+      - name: build kernel and demo guest
+        run: |
+          make kernel
+          make guest
+          cargo build --release
+      - name: boot the demo guest
+        run: |
+          TMPDIR=$RUNNER_TEMP ./target/release/drolin run \
+            --kernel kernel/dist/linux-um-aarch64 \
+            --initramfs images/dist/initramfs.cpio.gz \
+            --marker DROLIN_GUEST_OK --timeout 120
+      - name: build and boot Ubuntu
+        run: |
+          ./images/build-ubuntu.sh
+          TMPDIR=$RUNNER_TEMP ./target/release/drolin run \
+            --kernel kernel/dist/linux-um-aarch64 \
+            --rootfs images/dist/ubuntu-26.04.1-arm64.ext4 \
+            --init /init --arg drolin.poweroff=1 \
+            --marker DROLIN_GUEST_OK --timeout 180
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: android-actions/setup-android@v3
+      - name: install NDK
+        run: sdkmanager --install "ndk;30.0.16248370" "platforms;android-35" "build-tools;35.0.0"
+      - name: build bionic kernel
+        run: |
+          NDK="$ANDROID_HOME/ndk/30.0.16248370" ./kernel/build-android.sh
+          ls -lh kernel/dist/linux-um-aarch64 kernel/dist/stub_exe-aarch64
+      - name: build Ubuntu image
+        run: ./images/build-ubuntu.sh
+      - name: build APK
+        run: |
+          ANDROID_HOME="$ANDROID_HOME" \
+          KERNEL=kernel/dist/linux-um-aarch64 \
+          STUB=kernel/dist/stub_exe-aarch64 \
+          ROOTFS=images/dist/ubuntu-26.04.1-arm64.ext4 \
+          ./kotlin/build-apk.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drolin-apk
+          path: kotlin/dist/drolin.apk
