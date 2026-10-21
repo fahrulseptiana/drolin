@@ -107,6 +107,7 @@ class MainActivity : Activity() {
                 text.startsWith("guest already running") -> View.GONE
                 else -> View.VISIBLE
             }
+            if (text.startsWith("guest running")) showKeyboard()
         }
     }
 
@@ -116,6 +117,14 @@ class MainActivity : Activity() {
             status.text = "guest stopped (tap to boot)"
             status.visibility = View.VISIBLE
             stopService(Intent(this, GuestService::class.java))
+        }
+    }
+
+    fun showKeyboard() {
+        terminal.post {
+            terminal.requestFocus()
+            val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+            imm.showSoftInput(terminal, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
         }
     }
 

@@ -81,6 +81,7 @@ class TerminalClient(
 
     override fun onSingleTapUp(e: MotionEvent) {
         view.requestFocus()
+        activity.showKeyboard()
     }
 
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false
