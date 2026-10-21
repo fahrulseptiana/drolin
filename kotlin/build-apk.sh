@@ -77,6 +77,17 @@ if [ ! -f "$INITRAMFS" ]; then
 fi
 cp -f "$INITRAMFS" "$APP/assets/initramfs.cpio.gz"
 
+# The Ubuntu guest is the default payload. Keep the source image out of the
+# APK; ship it compressed and let the app expand it once into its data dir.
+ROOTFS=${ROOTFS:-$ROOT/images/dist/ubuntu-26.04.1-arm64.ext4}
+rm -f "$APP/assets/rootfs.ext4.gz"
+if [ -f "$ROOTFS" ]; then
+    gzip -n -9 -c "$ROOTFS" > "$APP/assets/rootfs.ext4.gz"
+    echo "bundled $(du -h "$APP/assets/rootfs.ext4.gz" | cut -f1) Ubuntu image"
+else
+    echo "WARNING: no Ubuntu image at $ROOTFS; the app will boot the demo initramfs" >&2
+fi
+
 KERNEL=${KERNEL:-$ROOT/kernel/dist/linux-um-$KERNEL_ARCH}
 if [ -f "$KERNEL" ]; then
     cp -f "$KERNEL" "$JNI/liblinux.so"

@@ -56,19 +56,29 @@ object GuestRuntime {
             return
         }
 
-        val initramfs = installAsset(context, "initramfs.cpio.gz")
         val log = File(context.filesDir, "guest.log")
+        val rootfs = File(context.filesDir, "rootfs.ext4")
+        if (!rootfs.isFile) installBundledRootfs(context, rootfs)
         val stub = File(libDir, "libstub.so")
         val command = mutableListOf(
             engine.absolutePath,
             "run",
             "--kernel", kernel.absolutePath,
-            "--initramfs", initramfs.absolutePath,
             "--memory", "512",
             "--marker", "DROLIN_GUEST_OK",
             "--timeout", "300",
             "--log", log.absolutePath,
         )
+        if (rootfs.isFile) {
+            command.add("--rootfs")
+            command.add(rootfs.absolutePath)
+            command.add("--init")
+            command.add("/init")
+        } else {
+            val initramfs = installAsset(context, "initramfs.cpio.gz")
+            command.add("--initramfs")
+            command.add(initramfs.absolutePath)
+        }
         if (stub.canExecute()) {
             command.add("--stub-exe")
             command.add(stub.absolutePath)
@@ -138,6 +148,25 @@ object GuestRuntime {
             if (process === current) process = null
         }
         emit("state: stopped (exit $code)\n")
+    }
+
+    private fun installBundledRootfs(context: Context, target: File) {
+        val assets = context.assets.list("")?.toSet() ?: emptySet()
+        if ("rootfs.ext4.gz" !in assets) return
+        emit("installing bundled Ubuntu root filesystem (first boot)...\n")
+        val partial = File(context.filesDir, "rootfs.ext4.part")
+        try {
+            context.assets.open("rootfs.ext4.gz").use { raw ->
+                java.util.zip.GZIPInputStream(raw).use { gzip ->
+                    partial.outputStream().use { output -> gzip.copyTo(output) }
+                }
+            }
+            if (!partial.renameTo(target)) error("cannot rename ${partial.name}")
+            emit("Ubuntu image ready\n")
+        } catch (error: Exception) {
+            partial.delete()
+            emit("cannot install Ubuntu image: ${error.message}\n")
+        }
     }
 
     private fun installAsset(context: Context, name: String): File {

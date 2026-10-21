@@ -62,7 +62,7 @@ class MainActivity : Activity(), GuestRuntime.Listener {
             text = "Boot demo"
             setOnClickListener {
                 startForegroundService()
-                GuestRuntime.start(this@MainActivity)
+                Thread({ GuestRuntime.start(this@MainActivity) }, "drolin-start").start()
             }
         }
         val stop = Button(this).apply {
