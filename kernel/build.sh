@@ -28,12 +28,6 @@ case "$HOST_ARCH" in
         ;;
     aarch64|arm64)
         SUBARCH=arm64
-        if [ ! -d "$HERE/src/linux-$KERNEL_VERSION/arch/arm64/um" ]; then
-            echo "kernel $KERNEL_VERSION has no arch/arm64/um subarch." >&2
-            echo "User-Mode Linux on arm64 is not part of upstream mainline." >&2
-            echo "Build on an x86_64 host, or supply an arm64 UML kernel built elsewhere." >&2
-            exit 3
-        fi
         ;;
     *)
         echo "unsupported host architecture: $HOST_ARCH" >&2
@@ -52,6 +46,10 @@ if [ "$SUBARCH" = arm64 ] && [ ! -f "$TREE/.drolin-arm64-patched" ]; then
     echo "applying the arm64 UML subarch patch"
     (cd "$TREE" && patch -p1 -f < "$HERE/patches/um-arm64.patch")
     touch "$TREE/.drolin-arm64-patched"
+fi
+if [ "$SUBARCH" = arm64 ] && [ ! -d "$TREE/arch/arm64/um" ]; then
+    echo "the arm64 UML subarch patch did not produce arch/arm64/um" >&2
+    exit 3
 fi
 OUT=${DROLIN_KERNEL_OUT:-$HERE/build}
 DIST=${DROLIN_KERNEL_DIST:-$HERE/dist}
