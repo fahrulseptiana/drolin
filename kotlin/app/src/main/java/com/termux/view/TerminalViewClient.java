@@ -46,6 +46,11 @@ public interface TerminalViewClient {
 
     boolean onKeyUp(int keyCode, KeyEvent e);
 
+    /** Enter pressed after the session's process has exited. Return true if handled. */
+    default boolean onSessionFinishedEnter() {
+        return false;
+    }
+
     boolean onLongPress(MotionEvent event);
 
 

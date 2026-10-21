@@ -89,7 +89,20 @@ class TerminalClient(
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
     override fun isTerminalViewSelected(): Boolean = true
     override fun copyModeChanged(copyMode: Boolean) = Unit
-    override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean = false
+    override fun onKeyDown(keyCode: Int, e: KeyEvent, session: TerminalSession): Boolean {
+        if (GuestSession.isFinished &&
+            (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_DPAD_CENTER)
+        ) {
+            activity.finishAndRemoveTask()
+            return true
+        }
+        return false
+    }
+
+    override fun onSessionFinishedEnter(): Boolean {
+        activity.finishAndRemoveTask()
+        return true
+    }
     override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
     override fun onLongPress(event: MotionEvent): Boolean = false
     override fun readControlKey(): Boolean = false

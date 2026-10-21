@@ -21,6 +21,12 @@ object GuestSession {
     @Volatile
     private var starting = false
 
+    @Volatile
+    private var finished = false
+
+    val isFinished: Boolean
+        get() = finished
+
     val isRunning: Boolean
         get() = session != null
 
@@ -123,6 +129,7 @@ object GuestSession {
         )
         session = started
         starting = false
+        finished = false
         activity.onSessionState("booting Ubuntu 26.04")
         terminalView.post {
             terminalView.attachSession(started)
@@ -134,10 +141,12 @@ object GuestSession {
     fun stop() {
         session?.finishIfRunning()
         session = null
+        finished = false
     }
 
     fun onSessionFinished() {
         session = null
+        finished = true
     }
 
     private fun installBundledRootfs(context: Context, target: File) {

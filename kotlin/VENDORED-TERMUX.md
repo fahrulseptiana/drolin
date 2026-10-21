@@ -18,3 +18,7 @@ Local changes:
   one APK with one resource namespace rather than two Gradle library modules.
 * The four `androidx.annotation` usages are satisfied by three local annotation
   stubs, so the app has no AndroidX dependency.
+* `TerminalViewClient` has a default `onSessionFinishedEnter()` hook, called by
+  the input connection and key handling when Enter is pressed after the process
+  exits. It exists so the host can close the app instead of just printing
+  "[Process completed - press Enter]".

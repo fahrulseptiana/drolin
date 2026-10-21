@@ -379,6 +379,11 @@ public final class TerminalView extends View {
             }
 
             void sendTextToTerminal(CharSequence text) {
+                if (mTermSession != null && !mTermSession.isRunning()
+                    && text.toString().contains("\n")
+                    && mClient.onSessionFinishedEnter()) {
+                    return;
+                }
                 stopTextSelectionMode();
                 final int textLengthInChars = text.length();
                 for (int i = 0; i < textLengthInChars; i++) {
