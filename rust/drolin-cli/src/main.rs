@@ -37,6 +37,7 @@ Boot options:
   --memory MIB              guest memory, default 512
   --cpus N                  guest CPUs, default 1
   --init PATH               guest PID 1 (absolute)
+  --stub-exe PATH           standalone stub binary for hosts that reject memfd exec
   --console MODE            stdio (default), pty, none
   --mode MODE               ptrace (default), nosysemu, seccomp
   --guest-page-size KIB     tell the planner the guest page size
@@ -275,6 +276,7 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
             "--memory" => common.spec.memory_mib = parse_number(&take_value(args, &mut index)?, "--memory")?,
             "--cpus" => common.spec.cpus = parse_number(&take_value(args, &mut index)?, "--cpus")?,
             "--init" => common.spec.init = Some(take_value(args, &mut index)?),
+            "--stub-exe" => common.spec.stub_exe = Some(take_value(args, &mut index)?),
             "--console" => {
                 let value = take_value(args, &mut index)?;
                 common.spec.console = match value.as_str() {

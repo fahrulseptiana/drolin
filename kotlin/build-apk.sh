@@ -87,6 +87,15 @@ else
     echo "WARNING: the APK will install, but the app will report a missing kernel" >&2
 fi
 
+STUB=${STUB:-$ROOT/kernel/dist/stub_exe-$KERNEL_ARCH}
+if [ -f "$STUB" ]; then
+    cp -f "$STUB" "$JNI/libstub.so"
+    chmod 755 "$JNI/libstub.so"
+else
+    rm -f "$JNI/libstub.so"
+    echo "WARNING: no standalone stub at $STUB; Android may refuse to execute the embedded one" >&2
+fi
+
 BUILD="$HERE/build"
 rm -rf "$BUILD"
 mkdir -p "$BUILD/classes" "$BUILD/dex" "$BUILD/res"

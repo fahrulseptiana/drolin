@@ -58,7 +58,8 @@ object GuestRuntime {
 
         val initramfs = installAsset(context, "initramfs.cpio.gz")
         val log = File(context.filesDir, "guest.log")
-        val command = listOf(
+        val stub = File(libDir, "libstub.so")
+        val command = mutableListOf(
             engine.absolutePath,
             "run",
             "--kernel", kernel.absolutePath,
@@ -68,13 +69,25 @@ object GuestRuntime {
             "--timeout", "300",
             "--log", log.absolutePath,
         )
+        if (stub.canExecute()) {
+            command.add("--stub-exe")
+            command.add(stub.absolutePath)
+        }
 
         emit("$ ${command.joinToString(" ")}\n")
         emit("state: starting\n")
         val started = try {
             ProcessBuilder(command)
                 .redirectErrorStream(true)
-                .apply { environment()["DROLIN_HOME"] = context.filesDir.absolutePath }
+                .apply {
+                    // UML needs a writable, executable temporary directory for
+                    // its guard page and for the standalone-stub fallback.
+                    // App cache is the one place an unprivileged app may mmap
+                    // PROT_EXEC; /tmp and /dev/shm are not.
+                    environment()["DROLIN_HOME"] = context.filesDir.absolutePath
+                    environment()["TMPDIR"] = context.cacheDir.absolutePath
+                    environment()["HOME"] = context.filesDir.absolutePath
+                }
                 .start()
         } catch (error: Exception) {
             emit("cannot start the engine: ${error.message}\n")

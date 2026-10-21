@@ -86,5 +86,10 @@ if [ ! -x "$BIN" ]; then
 fi
 DEST="$DIST/linux-um-$HOST_ARCH"
 cp -f "$BIN" "$DEST"
+STUB="$OUT/arch/um/kernel/skas/stub_exe"
+if [ -x "$STUB" ]; then
+    cp -f "$STUB" "$DIST/stub_exe-$HOST_ARCH"
+    echo "wrote $DIST/stub_exe-$HOST_ARCH"
+fi
 echo "wrote $DEST"
 file "$DEST" 2>/dev/null || true

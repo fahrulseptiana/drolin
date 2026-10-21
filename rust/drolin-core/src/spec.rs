@@ -73,6 +73,9 @@ pub struct GuestSpec {
     pub cpus: u16,
     /// Guest path executed as PID 1. `None` leaves the kernel default.
     pub init: Option<String>,
+    /// Host path to a standalone stub binary. Android needs this because it
+    /// refuses to execute an anonymous memfd.
+    pub stub_exe: Option<String>,
     pub console: ConsoleMode,
     pub mode: BootMode,
     /// Guest page size in KiB when the caller knows it. Validated against the
@@ -93,6 +96,7 @@ impl Default for GuestSpec {
             memory_mib: 512,
             cpus: 1,
             init: None,
+            stub_exe: None,
             console: ConsoleMode::Stdio,
             mode: BootMode::Ptrace,
             guest_page_size_kib: None,
@@ -137,6 +141,7 @@ impl GuestSpec {
             ("initramfs", self.initramfs.as_ref()),
             ("rootfs", self.rootfs.as_ref()),
             ("data_disk", self.data_disk.as_ref()),
+            ("stub_exe", self.stub_exe.as_ref()),
             ("share", self.share.as_ref().map(|s| &s.host_path)),
         ] {
             let Some(path) = path else { continue };
@@ -239,6 +244,7 @@ fn is_reserved_key(key: &str) -> bool {
             | "root"
             | "rw"
             | "init"
+            | "stub_exe"
             | "hostfs"
             | "seccomp"
             | "nosysemu"

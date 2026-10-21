@@ -114,6 +114,9 @@ pub fn kernel_args(spec: &GuestSpec) -> Vec<KernelArg> {
     if let Some(init) = &spec.init {
         args.push(KernelArg::keyed("init", init));
     }
+    if let Some(stub) = &spec.stub_exe {
+        args.push(KernelArg::keyed("stub_exe", stub));
+    }
     args.push(KernelArg::flag("panic=-1"));
     args.extend(
         spec.mode
@@ -168,6 +171,7 @@ mod tests {
             memory_mib: 1024,
             cpus: 2,
             init: Some("/init".into()),
+            stub_exe: Some("/k/stub_exe".into()),
             console: ConsoleMode::Stdio,
             mode: BootMode::Seccomp,
             guest_page_size_kib: Some(16),
@@ -189,6 +193,7 @@ mod tests {
             "ubd1=/k/data.ext4",
             "hostfs=/host share",
             "init=/init",
+            "stub_exe=/k/stub_exe",
             "panic=-1",
             "seccomp=on",
             "quiet",

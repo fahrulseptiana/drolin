@@ -13,7 +13,7 @@ mod spec;
 mod target;
 
 pub use boot::{BootPlan, KernelArg};
-pub use image::{ImageRef, ImageSet};
+pub use image::{Compression, ImageRef, ImageSet};
 pub use marker::MarkerScanner;
 pub use session::{SessionState, TransitionError};
 pub use spec::{BootMode, ConsoleMode, GuestSpec, Issue, Severity, Share, Validation};

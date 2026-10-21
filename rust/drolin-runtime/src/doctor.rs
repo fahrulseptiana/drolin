@@ -114,6 +114,7 @@ pub fn diagnose_on(spec: &GuestSpec, facts: &HostFacts) -> Diagnosis {
     check_input(&mut checks, "initramfs", spec.initramfs.as_deref());
     check_input(&mut checks, "rootfs", spec.rootfs.as_deref());
     check_input(&mut checks, "data_disk", spec.data_disk.as_deref());
+    check_input(&mut checks, "stub_exe", spec.stub_exe.as_deref());
     if let Some(share) = &spec.share {
         if Path::new(&share.host_path).is_dir() {
             checks.push(Check::pass("share", "host directory exists"));
