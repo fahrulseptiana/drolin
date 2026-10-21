@@ -78,7 +78,7 @@ object GuestSession {
                 "--memory", "512",
             )
             if (rootfs.isFile) {
-                args += listOf("--rootfs", rootfs.absolutePath, "--init", "/init")
+                args += listOf("--rootfs", rootfs.absolutePath, "--init", "/sbin/init")
             } else {
                 val initramfs = installAsset(activity, "initramfs.cpio.gz")
                 args += listOf("--initramfs", initramfs.absolutePath)
