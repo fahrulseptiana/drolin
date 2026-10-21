@@ -1,0 +1,12 @@
+/target
+/kernel/src
+/kernel/dist
+/kernel/*.tar.xz
+/images/dist
+/.gradle
+/kotlin/.gradle
+/kotlin/local.properties
+/kotlin/**/build
+*.iml
+.idea
+.DS_Store

@@ -1,0 +1,14 @@
+[package]
+name = "drolin-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "drolin-init"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+strip = true
