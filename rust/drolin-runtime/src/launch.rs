@@ -19,6 +19,9 @@ pub struct LaunchOptions {
     /// This is what makes an interactive shell work from an Android app, where
     /// a pipe console is unreliable.
     pub pty: bool,
+    /// Hand the launcher's own stdio straight to the guest and do not capture.
+    /// Used when the parent is already a terminal (Termux's TerminalSession).
+    pub inherit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +64,36 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
             .collect::<Vec<_>>()
             .join("; ");
         return Err(LaunchError::Invalid(details));
+    }
+
+    if options.inherit {
+        let mut command = Command::new(&plan.executable);
+        command
+            .args(&plan.args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let mut child = command.spawn().map_err(|source| LaunchError::Spawn {
+            path: plan.executable.clone(),
+            source,
+        })?;
+        let started = Instant::now();
+        let (status, timed_out) = wait_with_timeout(&mut child, options.timeout)?;
+        let mut state = SessionState::Idle.start()?.mark_running()?;
+        state = if timed_out {
+            state.fail(format!(
+                "timed out after {} s",
+                options.timeout.unwrap_or_default().as_secs()
+            ))?
+        } else {
+            state.stop(status)?
+        };
+        return Ok(Outcome {
+            state,
+            marker_seen: false,
+            log_path: None,
+            elapsed_ms: started.elapsed().as_millis(),
+        });
     }
 
     static SESSION: AtomicU64 = AtomicU64::new(0);
@@ -114,15 +147,9 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
         done.store(true, Ordering::Release);
         let _ = output.join();
         let elapsed = started.elapsed();
-        return finish(
-            &scanner,
-            &log_path,
-            &log,
-            status,
-            timed_out,
-            elapsed,
-            options,
-        );
+        finish(
+            &scanner, &log_path, &log, status, timed_out, elapsed, options,
+        )
     } else {
         let child_out = log.try_clone()?;
         let child_err = log.try_clone()?;
@@ -145,7 +172,7 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
         done.store(true, Ordering::Release);
         let _ = reader.join();
         let elapsed = started.elapsed();
-        return finish(
+        finish(
             &scanner,
             &log_path,
             &Arc::new(Mutex::new(log)),
@@ -153,8 +180,8 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
             timed_out,
             elapsed,
             options,
-        );
-    };
+        )
+    }
 }
 
 fn finish(
@@ -293,7 +320,9 @@ fn tail(
     scanner: Option<Arc<Mutex<MarkerScanner>>>,
     done: Arc<AtomicBool>,
 ) {
-    let Ok(mut file) = File::open(path) else { return };
+    let Ok(mut file) = File::open(path) else {
+        return;
+    };
     if file.seek(SeekFrom::Start(start)).is_err() {
         return;
     }
@@ -404,6 +433,9 @@ mod tests {
     fn rejects_an_invalid_plan() {
         let mut plan = shell_plan("true");
         plan.spec.kernel.clear();
-        assert!(matches!(run(&plan, &LaunchOptions::default()), Err(LaunchError::Invalid(_))));
+        assert!(matches!(
+            run(&plan, &LaunchOptions::default()),
+            Err(LaunchError::Invalid(_))
+        ));
     }
 }

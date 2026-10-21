@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use drolin_core::{
-    BootMode, BootPlan, ConsoleMode, GuestSpec, ImageSet, Share, Validation,
-};
+use drolin_core::{BootMode, BootPlan, ConsoleMode, GuestSpec, ImageSet, Share, Validation};
 use drolin_runtime::doctor;
 use drolin_runtime::elf;
 use drolin_runtime::image::ImageStore;
@@ -49,6 +47,7 @@ Run options:
   --marker TEXT             success marker to scan for in the log
   --log PATH                write the guest's output to PATH
   --pty                     give the guest a pseudoterminal
+  --inherit                 run on the caller's stdio (Termux terminal)
 
 Exit codes:
   0 success, 1 guest/check failure, 2 usage, 3 invalid plan, 4 launch error.
@@ -96,19 +95,10 @@ impl std::fmt::Display for CliError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Common {
     spec: GuestSpec,
     json: bool,
-}
-
-impl Default for Common {
-    fn default() -> Self {
-        Self {
-            spec: GuestSpec::default(),
-            json: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,10 +108,22 @@ enum Parsed {
     Plan(Common),
     Run(Common, RunOptions),
     Doctor(Common),
-    KernelInspect { kernel: PathBuf, json: bool },
-    ImagesList { json: bool },
-    ImagesVerify { manifest: PathBuf, name: String },
-    ImagesInstall { manifest: PathBuf, name: String, source: PathBuf },
+    KernelInspect {
+        kernel: PathBuf,
+        json: bool,
+    },
+    ImagesList {
+        json: bool,
+    },
+    ImagesVerify {
+        manifest: PathBuf,
+        name: String,
+    },
+    ImagesInstall {
+        manifest: PathBuf,
+        name: String,
+        source: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,6 +132,7 @@ struct RunOptions {
     marker: Option<String>,
     log_path: Option<PathBuf>,
     pty: bool,
+    inherit: bool,
 }
 
 fn run_cli(args: Vec<String>) -> Result<u8, CliError> {
@@ -149,9 +152,11 @@ fn run_cli(args: Vec<String>) -> Result<u8, CliError> {
         Parsed::KernelInspect { kernel, json } => cmd_kernel_inspect(&kernel, json),
         Parsed::ImagesList { json } => cmd_images_list(json),
         Parsed::ImagesVerify { manifest, name } => cmd_images_verify(&manifest, &name),
-        Parsed::ImagesInstall { manifest, name, source } => {
-            cmd_images_install(&manifest, &name, &source)
-        }
+        Parsed::ImagesInstall {
+            manifest,
+            name,
+            source,
+        } => cmd_images_install(&manifest, &name, &source),
     }
 }
 
@@ -275,7 +280,9 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
                     host_path: take_value(args, &mut index)?,
                 })
             }
-            "--memory" => common.spec.memory_mib = parse_number(&take_value(args, &mut index)?, "--memory")?,
+            "--memory" => {
+                common.spec.memory_mib = parse_number(&take_value(args, &mut index)?, "--memory")?
+            }
             "--cpus" => common.spec.cpus = parse_number(&take_value(args, &mut index)?, "--cpus")?,
             "--init" => common.spec.init = Some(take_value(args, &mut index)?),
             "--stub-exe" => common.spec.stub_exe = Some(take_value(args, &mut index)?),
@@ -298,8 +305,10 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
                 };
             }
             "--guest-page-size" => {
-                common.spec.guest_page_size_kib =
-                    Some(parse_number(&take_value(args, &mut index)?, "--guest-page-size")?)
+                common.spec.guest_page_size_kib = Some(parse_number(
+                    &take_value(args, &mut index)?,
+                    "--guest-page-size",
+                )?)
             }
             "--arg" => common.spec.extra_args.push(take_value(args, &mut index)?),
             "--timeout" => {
@@ -313,10 +322,11 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
             "--marker" => run.marker = Some(take_value(args, &mut index)?),
             "--log" => run.log_path = Some(PathBuf::from(take_value(args, &mut index)?)),
             "--pty" => run.pty = true,
+            "--inherit" => run.inherit = true,
             other => {
                 return Err(CliError::Usage(format!(
                     "unknown option {other:?}; try `drolin --help`"
-                )))
+                )));
             }
         }
         index += 1;
@@ -381,8 +391,10 @@ fn cmd_run(common: Common, run: RunOptions) -> Result<u8, CliError> {
         marker: run.marker,
         log_path: run.log_path,
         pty: run.pty,
+        inherit: run.inherit,
     };
-    let outcome = launch::run(&plan, &options).map_err(|error| CliError::Runtime(error.to_string()))?;
+    let outcome =
+        launch::run(&plan, &options).map_err(|error| CliError::Runtime(error.to_string()))?;
     if common.json {
         print_json(&outcome)?;
     } else {
@@ -390,7 +402,11 @@ fn cmd_run(common: Common, run: RunOptions) -> Result<u8, CliError> {
         if options.marker.is_some() {
             println!(
                 "marker: {}",
-                if outcome.marker_seen { "found" } else { "missing" }
+                if outcome.marker_seen {
+                    "found"
+                } else {
+                    "missing"
+                }
             );
         }
     }
@@ -546,8 +562,19 @@ mod tests {
     #[test]
     fn plan_parses_boot_options() {
         let parsed = parse_ok(&[
-            "plan", "--kernel", "/k", "--memory", "1024", "--cpus", "2", "--mode", "seccomp",
-            "--console", "pty", "--arg", "quiet",
+            "plan",
+            "--kernel",
+            "/k",
+            "--memory",
+            "1024",
+            "--cpus",
+            "2",
+            "--mode",
+            "seccomp",
+            "--console",
+            "pty",
+            "--arg",
+            "quiet",
         ]);
         let Parsed::Plan(common) = parsed else {
             panic!("not a plan")
@@ -572,7 +599,15 @@ mod tests {
     #[test]
     fn run_parses_timeout_and_marker() {
         let parsed = parse_ok(&[
-            "run", "--kernel", "/k", "--timeout", "30", "--marker", "OK", "--log", "/tmp/log",
+            "run",
+            "--kernel",
+            "/k",
+            "--timeout",
+            "30",
+            "--marker",
+            "OK",
+            "--log",
+            "/tmp/log",
         ]);
         let Parsed::Run(_, run) = parsed else {
             panic!("not a run")
