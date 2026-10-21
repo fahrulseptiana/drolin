@@ -45,6 +45,11 @@ TREE="$HERE/src/linux-$KERNEL_VERSION"
 if [ "$SUBARCH" = arm64 ] && [ ! -f "$TREE/.drolin-arm64-patched" ]; then
     echo "applying the arm64 UML subarch patch"
     (cd "$TREE" && patch -p1 -f < "$HERE/patches/um-arm64.patch")
+    # patch(1) does not preserve the executable bit on a new file, and this
+    # script is invoked directly by the vDSO Makefile. A non-executable script
+    # makes the offsets header empty without failing the build.
+    chmod +x "$TREE/arch/arm64/um/vdso/gen_vdso_offsets.sh"
+    touch "$TREE/arch/arm64/um/vdso/gen_vdso_offsets.sh"
     touch "$TREE/.drolin-arm64-patched"
 fi
 if [ "$SUBARCH" = arm64 ] && [ ! -d "$TREE/arch/arm64/um" ]; then
