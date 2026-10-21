@@ -55,6 +55,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
       - uses: android-actions/setup-android@v3
       - name: install build dependencies
         run: |
