@@ -62,8 +62,14 @@ class MainActivity : Activity() {
         // content starts below the status bar/cutout and above the nav bar.
         root.setOnApplyWindowInsetsListener { view, insets ->
             if (Build.VERSION.SDK_INT >= 30) {
+                // The IME is not part of systemBars. Without it the terminal
+                // keeps its full height behind the keyboard and the prompt in a
+                // long scrollback is hidden. adjustResize + this inset keeps the
+                // visible terminal above the IME.
                 val bars = insets.getInsets(
-                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+                    WindowInsets.Type.systemBars() or
+                        WindowInsets.Type.displayCutout() or
+                        WindowInsets.Type.ime(),
                 )
                 view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
             } else {
