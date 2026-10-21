@@ -1,7 +1,8 @@
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,10 @@ pub struct LaunchOptions {
     pub timeout: Option<Duration>,
     pub marker: Option<String>,
     pub log_path: Option<PathBuf>,
+    /// Give the guest a pseudoterminal and bridge it to this process's stdio.
+    /// This is what makes an interactive shell work from an Android app, where
+    /// a pipe console is unreliable.
+    pub pty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,9 +47,10 @@ pub enum LaunchError {
 
 /// Start a guest, forward its output, and wait for it.
 ///
-/// The launcher owns no policy: the executable and arguments come from
-/// `drolin-core`. This function adds only the host-specific parts -- spawning,
-/// tee-ing to a log, killing at the deadline, and reading the marker.
+/// The guest's console is attached to a regular file rather than a pipe. UML's
+/// fd console uses poll/epoll on its descriptors; on Android a pipe makes guest
+/// writes stall, while a file works. Tailing the file gives the same live
+/// output and makes marker detection independent of host pipe semantics.
 pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchError> {
     let facts = crate::host::host_facts();
     let validation: Validation = plan.spec.validate_on(Some(&facts));
@@ -57,57 +63,109 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
         return Err(LaunchError::Invalid(details));
     }
 
-    let log = match &options.log_path {
-        Some(path) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let mut file = File::create(path)?;
-            writeln!(file, "# {}", plan.command_line())?;
-            Some(Arc::new(Mutex::new(file)))
-        }
-        None => None,
-    };
-
-    let mut command = Command::new(&plan.executable);
-    command
-        .args(&plan.args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|source| LaunchError::Spawn {
-        path: plan.executable.clone(),
-        source,
-    })?;
+    static SESSION: AtomicU64 = AtomicU64::new(0);
+    let log_path = options.log_path.clone().unwrap_or_else(|| {
+        let session = SESSION.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("drolin-{}-{session}.log", std::process::id()))
+    });
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut log = File::create(&log_path)?;
+    writeln!(log, "# {}", plan.command_line())?;
+    log.flush()?;
+    let header_len = log.metadata()?.len();
 
     let scanner = options
         .marker
         .as_ref()
         .map(|marker| Arc::new(Mutex::new(MarkerScanner::new(marker.clone()))));
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_thread = stdout.map(|stream| {
-        let scanner = scanner.clone();
-        let log = log.clone();
-        std::thread::spawn(move || tee(stream, false, scanner, log))
-    });
-    let stderr_thread = stderr.map(|stream| {
-        let scanner = scanner.clone();
-        let log = log.clone();
-        std::thread::spawn(move || tee(stream, true, scanner, log))
-    });
+    let mut command = Command::new(&plan.executable);
+    command.args(&plan.args);
 
-    let started = Instant::now();
-    let (status, timed_out) = wait_with_timeout(&mut child, options.timeout)?;
-    if let Some(thread) = stdout_thread {
-        let _ = thread.join();
-    }
-    if let Some(thread) = stderr_thread {
-        let _ = thread.join();
-    }
+    let done = Arc::new(AtomicBool::new(false));
+    if options.pty {
+        let (master, slave) = open_pty()?;
+        let slave_in = slave.try_clone()?;
+        let slave_out = slave.try_clone()?;
+        command
+            .stdin(Stdio::from(slave_in))
+            .stdout(Stdio::from(slave_out))
+            .stderr(Stdio::from(slave));
+        let mut child = command.spawn().map_err(|source| LaunchError::Spawn {
+            path: plan.executable.clone(),
+            source,
+        })?;
 
-    let elapsed = started.elapsed();
+        let read_master = master.try_clone()?;
+        let write_master = master;
+        let log = Arc::new(Mutex::new(log));
+        let output = {
+            let scanner = scanner.clone();
+            let log = log.clone();
+            let done = done.clone();
+            std::thread::spawn(move || pump_master(read_master, scanner, log, done))
+        };
+        std::thread::spawn(move || pump_stdin(write_master));
+
+        let started = Instant::now();
+        let (status, timed_out) = wait_with_timeout(&mut child, options.timeout)?;
+        done.store(true, Ordering::Release);
+        let _ = output.join();
+        let elapsed = started.elapsed();
+        return finish(
+            &scanner,
+            &log_path,
+            &log,
+            status,
+            timed_out,
+            elapsed,
+            options,
+        );
+    } else {
+        let child_out = log.try_clone()?;
+        let child_err = log.try_clone()?;
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::from(child_out))
+            .stderr(Stdio::from(child_err));
+        let mut child = command.spawn().map_err(|source| LaunchError::Spawn {
+            path: plan.executable.clone(),
+            source,
+        })?;
+        let tail_path = log_path.clone();
+        let done_for_tail = done.clone();
+        let scanner_for_tail = scanner.clone();
+        let reader = std::thread::spawn(move || {
+            tail(&tail_path, header_len, scanner_for_tail, done_for_tail)
+        });
+        let started = Instant::now();
+        let (status, timed_out) = wait_with_timeout(&mut child, options.timeout)?;
+        done.store(true, Ordering::Release);
+        let _ = reader.join();
+        let elapsed = started.elapsed();
+        return finish(
+            &scanner,
+            &log_path,
+            &Arc::new(Mutex::new(log)),
+            status,
+            timed_out,
+            elapsed,
+            options,
+        );
+    };
+}
+
+fn finish(
+    scanner: &Option<Arc<Mutex<MarkerScanner>>>,
+    log_path: &std::path::Path,
+    _log: &Arc<Mutex<File>>,
+    status: Option<i32>,
+    timed_out: bool,
+    elapsed: Duration,
+    options: &LaunchOptions,
+) -> Result<Outcome, LaunchError> {
     let marker_seen = scanner
         .as_ref()
         .map(|scanner| scanner.lock().expect("marker scanner").seen())
@@ -121,16 +179,90 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
     } else {
         state.stop(status)?
     };
-
     Ok(Outcome {
         state,
         marker_seen,
-        log_path: options
-            .log_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
+        log_path: Some(log_path.display().to_string()),
         elapsed_ms: elapsed.as_millis(),
     })
+}
+
+fn open_pty() -> io::Result<(File, File)> {
+    use std::os::fd::FromRawFd;
+    let mut master = -1;
+    let mut slave = -1;
+    let result = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe { Ok((File::from_raw_fd(master), File::from_raw_fd(slave))) }
+}
+
+fn pump_master(
+    mut master: File,
+    scanner: Option<Arc<Mutex<MarkerScanner>>>,
+    log: Arc<Mutex<File>>,
+    done: Arc<AtomicBool>,
+) {
+    use std::os::fd::AsRawFd;
+    unsafe {
+        libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
+    }
+    let mut buffer = [0u8; 8192];
+    loop {
+        match master.read(&mut buffer) {
+            Ok(0) => return,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(libc::EAGAIN) =>
+            {
+                if done.load(Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(read) => {
+                let chunk = &buffer[..read];
+                let _ = io::stdout().write_all(chunk);
+                let _ = io::stdout().flush();
+                if let Some(scanner) = &scanner {
+                    scanner.lock().expect("marker scanner").push(chunk);
+                }
+                if let Ok(mut file) = log.lock() {
+                    let _ = file.write_all(chunk);
+                    let _ = file.flush();
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+fn pump_stdin(mut master: File) {
+    let mut stdin = io::stdin();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match stdin.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => {
+                if master.write_all(&buffer[..read]).is_err() {
+                    return;
+                }
+                let _ = master.flush();
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
+        }
+    }
 }
 
 fn wait_with_timeout(
@@ -155,36 +287,35 @@ fn wait_with_timeout(
     }
 }
 
-fn tee(
-    mut stream: impl Read,
-    is_stderr: bool,
+fn tail(
+    path: &std::path::Path,
+    start: u64,
     scanner: Option<Arc<Mutex<MarkerScanner>>>,
-    log: Option<Arc<Mutex<File>>>,
+    done: Arc<AtomicBool>,
 ) {
+    let Ok(mut file) = File::open(path) else { return };
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return;
+    }
     let mut buffer = [0u8; 8192];
     loop {
-        let read = match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        };
-        let chunk = &buffer[..read];
-        if is_stderr {
-            let _ = io::stderr().write_all(chunk);
-            let _ = io::stderr().flush();
-        } else {
-            let _ = io::stdout().write_all(chunk);
-            let _ = io::stdout().flush();
-        }
-        if let Some(scanner) = &scanner {
-            scanner.lock().expect("marker scanner").push(chunk);
-        }
-        if let Some(log) = &log {
-            if let Ok(mut file) = log.lock() {
-                let _ = file.write_all(chunk);
-                let _ = file.flush();
+        match file.read(&mut buffer) {
+            Ok(0) => {
+                if done.load(Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
+            Ok(read) => {
+                let chunk = &buffer[..read];
+                let _ = io::stdout().write_all(chunk);
+                let _ = io::stdout().flush();
+                if let Some(scanner) = &scanner {
+                    scanner.lock().expect("marker scanner").push(chunk);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return,
         }
     }
 }

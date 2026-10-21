@@ -48,6 +48,7 @@ Run options:
   --timeout SECS            kill the guest after SECS (0 disables)
   --marker TEXT             success marker to scan for in the log
   --log PATH                write the guest's output to PATH
+  --pty                     give the guest a pseudoterminal
 
 Exit codes:
   0 success, 1 guest/check failure, 2 usage, 3 invalid plan, 4 launch error.
@@ -128,6 +129,7 @@ struct RunOptions {
     timeout: Option<Duration>,
     marker: Option<String>,
     log_path: Option<PathBuf>,
+    pty: bool,
 }
 
 fn run_cli(args: Vec<String>) -> Result<u8, CliError> {
@@ -310,6 +312,7 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
             }
             "--marker" => run.marker = Some(take_value(args, &mut index)?),
             "--log" => run.log_path = Some(PathBuf::from(take_value(args, &mut index)?)),
+            "--pty" => run.pty = true,
             other => {
                 return Err(CliError::Usage(format!(
                     "unknown option {other:?}; try `drolin --help`"
@@ -377,6 +380,7 @@ fn cmd_run(common: Common, run: RunOptions) -> Result<u8, CliError> {
         timeout: run.timeout,
         marker: run.marker,
         log_path: run.log_path,
+        pty: run.pty,
     };
     let outcome = launch::run(&plan, &options).map_err(|error| CliError::Runtime(error.to_string()))?;
     if common.json {
@@ -390,10 +394,16 @@ fn cmd_run(common: Common, run: RunOptions) -> Result<u8, CliError> {
             );
         }
     }
-    let failed = !outcome.state.is_terminal()
-        || matches!(outcome.state, drolin_core::SessionState::Failed { .. })
-        || (options.marker.is_some() && !outcome.marker_seen)
-        || matches!(outcome.state, drolin_core::SessionState::Stopped { exit_code: Some(code) } if code != 0);
+    // A requested marker is the success criterion. A guest that stays up
+    // (an interactive shell, or an image that has no poweroff tool) is not a
+    // failure once it has proved it booted.
+    let failed = if options.marker.is_some() {
+        !outcome.marker_seen
+    } else {
+        !outcome.state.is_terminal()
+            || matches!(outcome.state, drolin_core::SessionState::Failed { .. })
+            || matches!(outcome.state, drolin_core::SessionState::Stopped { exit_code: Some(code) } if code != 0)
+    };
     Ok(if failed { 1 } else { 0 })
 }
 

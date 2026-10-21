@@ -58,6 +58,7 @@ version = "0.1.0"
 dependencies = [
  "drolin-core",
  "drolin-runtime",
+ "serde",
  "serde_json",
 ]
 
@@ -73,12 +74,16 @@ dependencies = [
 [[package]]
 name = "drolin-init"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "drolin-runtime"
 version = "0.1.0"
 dependencies = [
  "drolin-core",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
