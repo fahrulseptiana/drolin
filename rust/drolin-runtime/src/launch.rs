@@ -57,7 +57,7 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
         return Err(LaunchError::Invalid(details));
     }
 
-    let mut log = match &options.log_path {
+    let log = match &options.log_path {
         Some(path) => {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
