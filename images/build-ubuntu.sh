@@ -93,10 +93,14 @@ case " $(cat /proc/cmdline 2>/dev/null) " in
         ;;
 esac
 if [ -t 0 ]; then
-    exec /bin/bash -l
+    /bin/bash -l
 else
-    exec /bin/bash -l -i
+    /bin/bash -l -i
 fi
+if [ -x /usr/sbin/drolin-poweroff ]; then
+    exec /usr/sbin/drolin-poweroff
+fi
+exit 0
 INIT
 $SUDO chmod 755 "$ROOT/init"
 
@@ -119,6 +123,8 @@ if [ -z "${POWEROFF:-}" ]; then
 fi
 if [ -n "${POWEROFF:-}" ] && [ -f "$POWEROFF" ]; then
     $SUDO install -m 755 "$POWEROFF" "$ROOT/usr/sbin/drolin-poweroff"
+    $SUDO ln -sf drolin-poweroff "$ROOT/usr/sbin/poweroff"
+    $SUDO ln -sf drolin-poweroff "$ROOT/usr/sbin/halt"
 fi
 
 IMAGE="$DIST/ubuntu-$VERSION-$ARCH.ext4"
