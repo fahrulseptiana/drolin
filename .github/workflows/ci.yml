@@ -47,10 +47,15 @@ jobs:
           TMPDIR=$RUNNER_TEMP ./target/release/drolin run \
             --kernel kernel/dist/linux-um-aarch64 \
             --rootfs images/dist/ubuntu-26.04.1-arm64.ext4 \
-            --init /init --arg drolin.poweroff=1 \
+            --init /sbin/init --arg drolin.poweroff=1 \
             --marker DROLIN_GUEST_OK --timeout 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-rootfs
+          path: images/dist/ubuntu-26.04.1-arm64.ext4
 
   android:
+    needs: guest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,8 +75,10 @@ jobs:
         run: |
           NDK="$ANDROID_HOME/ndk/30.0.16248370" ./kernel/build-android.sh
           ls -lh kernel/dist/linux-um-aarch64 kernel/dist/stub_exe-aarch64
-      - name: build Ubuntu image
-        run: ./images/build-ubuntu.sh
+      - uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-rootfs
+          path: images/dist
       - name: build APK
         run: |
           ANDROID_HOME="$ANDROID_HOME" \
