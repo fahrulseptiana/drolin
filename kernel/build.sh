@@ -44,6 +44,15 @@ esac
 "$HERE/fetch.sh"
 
 TREE="$HERE/src/linux-$KERNEL_VERSION"
+
+# The pinned tree carries an arm64 UML subarch as a patch. Upstream's UML
+# subarch lives under arch/x86/um; this patch adds arch/arm64/um and the
+# generic hooks it needs. It is applied once and stamped so a re-run is cheap.
+if [ "$SUBARCH" = arm64 ] && [ ! -f "$TREE/.drolin-arm64-patched" ]; then
+    echo "applying the arm64 UML subarch patch"
+    (cd "$TREE" && patch -p1 -f < "$HERE/patches/um-arm64.patch")
+    touch "$TREE/.drolin-arm64-patched"
+fi
 OUT=${DROLIN_KERNEL_OUT:-$HERE/build}
 DIST=${DROLIN_KERNEL_DIST:-$HERE/dist}
 JOBS=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}
@@ -60,9 +69,7 @@ export KBUILD_BUILD_HOST=${KBUILD_BUILD_HOST:-drolin}
 mkdir -p "$OUT" "$DIST"
 # shellcheck disable=SC2086
 $MAKE defconfig
-# shellcheck disable=SC2086
-$MAKE scripts/kconfig/merge_config.sh 2>/dev/null || true
-# merge_config.sh is a host script, not a make target; call it directly.
+# merge_config.sh is a host script, not a make target.
 "$TREE/scripts/kconfig/merge_config.sh" -m -O "$OUT" "$OUT/.config" "$HERE/config/minimal.config"
 # shellcheck disable=SC2086
 $MAKE olddefconfig

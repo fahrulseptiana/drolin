@@ -10,3 +10,13 @@
 *.iml
 .idea
 .DS_Store
+
+# generated Android payloads
+/kotlin/.tools
+/kotlin/build
+/kotlin/dist
+/kotlin/debug.keystore
+/kotlin/app/src/main/jni/*/lib*.so
+/kotlin/app/src/main/assets/*
+# fetched kernel source and cache
+/kernel/cache

@@ -25,7 +25,11 @@ fi
 
 if [ -z "$INIT" ]; then
     echo "building drolin-init for $TARGET"
-    cargo build --manifest-path "$ROOT/Cargo.toml" --release --target "$TARGET" -p drolin-init
+    # rust-lld is self-contained for the musl targets, including when the build
+    # host is macOS. A Linux host can use it too; no external cross linker is
+    # required either way.
+    RUSTFLAGS="${RUSTFLAGS:-} -C linker=rust-lld" \
+        cargo build --manifest-path "$ROOT/Cargo.toml" --release --target "$TARGET" -p drolin-init
     INIT="$ROOT/target/$TARGET/release/drolin-init"
 fi
 
