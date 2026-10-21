@@ -4,30 +4,40 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
+import android.view.WindowInsets
+import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.termux.view.TerminalView
 
 class MainActivity : Activity() {
+    private lateinit var root: LinearLayout
     private lateinit var terminal: TerminalView
     private lateinit var status: TextView
     private lateinit var client: TerminalClient
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureWindow()
 
-        val root = LinearLayout(this).apply {
+        root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.BLACK)
         }
         status = TextView(this).apply {
-            text = "idle"
+            text = "booting Ubuntu 26.04"
             textSize = 12f
-            setPadding(24, 12, 24, 12)
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.BLACK)
+            setPadding(24, 10, 24, 10)
+            setOnClickListener {
+                if (!GuestSession.isRunning) bootGuest()
+            }
         }
         terminal = TerminalView(this, null).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -35,39 +45,39 @@ class MainActivity : Activity() {
                 0,
                 1f,
             )
-            // The renderer only paints non-default cell backgrounds; the view
-            // itself must supply the terminal's default background. Termux's
-            // dark theme does this for its own activity.
-            setBackgroundColor(0xFF000000.toInt())
+            // The renderer paints only non-default cell backgrounds; the view
+            // supplies the terminal's default black background.
+            setBackgroundColor(Color.BLACK)
             isFocusable = true
             isFocusableInTouchMode = true
         }
         client = TerminalClient(this, terminal)
         terminal.setTextSize(14)
 
-        val boot = Button(this).apply {
-            text = "Boot Ubuntu"
-            setOnClickListener { bootGuest() }
-        }
-        val stop = Button(this).apply {
-            text = "Stop"
-            setOnClickListener {
-                GuestSession.stop()
-                stopService(Intent(this@MainActivity, GuestService::class.java))
-                status.text = "stopped"
-            }
-        }
-        val toolbar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            addView(boot)
-            addView(stop)
-        }
-
-        root.addView(toolbar)
-        root.addView(status)
+        root.addView(status, LinearLayout.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         root.addView(terminal)
         setContentView(root)
+
+        // Safe area: the window is edge-to-edge and black behind the bars; the
+        // content starts below the status bar/cutout and above the nav bar.
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            if (Build.VERSION.SDK_INT >= 30) {
+                val bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+                )
+                view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            } else {
+                @Suppress("DEPRECATION")
+                view.setPadding(
+                    insets.systemWindowInsetLeft,
+                    insets.systemWindowInsetTop,
+                    insets.systemWindowInsetRight,
+                    insets.systemWindowInsetBottom,
+                )
+            }
+            insets
+        }
+        root.requestApplyInsets()
 
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -76,9 +86,7 @@ class MainActivity : Activity() {
         }
 
         GuestSession.attach(this, terminal, client)
-        if (!GuestSession.isRunning) {
-            bootGuest()
-        }
+        if (!GuestSession.isRunning) bootGuest()
     }
 
     override fun onResume() {
@@ -93,11 +101,11 @@ class MainActivity : Activity() {
 
     fun onSessionState(text: String) {
         runOnUiThread {
-            status.text = text
-            if (text.startsWith("guest") || text.startsWith("booting")) {
-                val intent = Intent(this, GuestService::class.java)
-                    .setAction(GuestService.ACTION_START)
-                if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+            status.text = if (text == "guest stopped") "guest stopped (tap to boot)" else text
+            status.visibility = when {
+                text.startsWith("guest running") -> View.GONE
+                text.startsWith("guest already running") -> View.GONE
+                else -> View.VISIBLE
             }
         }
     }
@@ -105,7 +113,8 @@ class MainActivity : Activity() {
     fun onSessionFinished() {
         GuestSession.onSessionFinished()
         runOnUiThread {
-            status.text = "guest stopped"
+            status.text = "guest stopped (tap to boot)"
+            status.visibility = View.VISIBLE
             stopService(Intent(this, GuestService::class.java))
         }
     }
@@ -118,5 +127,31 @@ class MainActivity : Activity() {
                 onSessionState("boot failed: ${error.message}")
             }
         }, "drolin-boot").start()
+    }
+
+    private fun configureWindow() {
+        window.statusBarColor = Color.BLACK
+        window.navigationBarColor = Color.BLACK
+        window.decorView.setBackgroundColor(Color.BLACK)
+        if (Build.VERSION.SDK_INT >= 28) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.setSystemBarsAppearance(
+                0,
+                android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
     }
 }
