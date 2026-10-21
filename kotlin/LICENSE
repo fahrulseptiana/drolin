@@ -1,0 +1,6 @@
+The Kotlin Android app in this directory is released under the Apache License,
+Version 2.0. The vendored Termux terminal sources are also Apache-2.0; see
+LICENSE-TERMUX and VENDORED-TERMUX.md.
+
+The Rust engine and the kernel patch are separate works under GPL-2.0-only.
+The app and the engine communicate by executing a process, not by linking.

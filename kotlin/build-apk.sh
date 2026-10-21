@@ -109,31 +109,44 @@ fi
 
 BUILD="$HERE/build"
 rm -rf "$BUILD"
-mkdir -p "$BUILD/classes" "$BUILD/dex" "$BUILD/res"
+mkdir -p "$BUILD/classes" "$BUILD/dex" "$BUILD/res" "$BUILD/gen"
 
-echo "compiling Kotlin"
-"$KOTLIN_HOME/bin/kotlinc" \
-    -jvm-target 11 \
-    -classpath "$ANDROID_JAR:$KOTLIN_HOME/lib/kotlin-stdlib.jar" \
-    -d "$BUILD/classes" \
-    "$APP"/java/dev/drolin/*.kt
-
-jar cf "$BUILD/classes.jar" -C "$BUILD/classes" .
-"$BT/d8" --release --min-api 26 --lib "$ANDROID_JAR" \
-    --output "$BUILD/dex" "$BUILD/classes.jar" "$KOTLIN_HOME/lib/kotlin-stdlib.jar"
-
-echo "packaging resources"
+echo "generating resources"
 "$BT/aapt2" compile --dir "$APP/res" -o "$BUILD/res.zip"
 "$BT/aapt2" link \
     -o "$BUILD/base.apk" \
     -I "$ANDROID_JAR" \
     --manifest "$APP/AndroidManifest.xml" \
     -A "$APP/assets" \
+    --java "$BUILD/gen" \
     --min-sdk-version 26 \
     --target-sdk-version 35 \
     --version-code 1 \
     --version-name 0.1.0 \
     "$BUILD/res.zip"
+
+echo "compiling Java (vendored Termux terminal)"
+find "$APP/java" -name '*.java' > "$BUILD/java-sources.txt"
+javac -source 11 -target 11 -Xlint:-options \
+    -classpath "$ANDROID_JAR:$BUILD/gen" \
+    -d "$BUILD/classes" \
+    @"$BUILD/java-sources.txt"
+
+echo "compiling Kotlin"
+"$KOTLIN_HOME/bin/kotlinc" \
+    -jvm-target 11 \
+    -classpath "$ANDROID_JAR:$BUILD/gen:$BUILD/classes:$KOTLIN_HOME/lib/kotlin-stdlib.jar" \
+    -d "$BUILD/classes" \
+    "$APP"/java/dev/drolin/*.kt
+
+echo "compiling the Termux pty shim"
+"$NDK/toolchains/llvm/prebuilt/$NDK_HOST/bin/${RUST_TARGET}26-clang" \
+    -shared -fPIC -O2 -o "$JNI/libtermux.so" "$APP/jni/termux.c"
+chmod 755 "$JNI/libtermux.so"
+
+jar cf "$BUILD/classes.jar" -C "$BUILD/classes" .
+"$BT/d8" --release --min-api 26 --lib "$ANDROID_JAR" \
+    --output "$BUILD/dex" "$BUILD/classes.jar" "$KOTLIN_HOME/lib/kotlin-stdlib.jar"
 
 (cd "$BUILD/dex" && zip -q ../base.apk classes.dex)
 mkdir -p "$BUILD/lib/$ABI"

@@ -6,90 +6,67 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
+import com.termux.view.TerminalView
 
-class MainActivity : Activity(), GuestRuntime.Listener {
+class MainActivity : Activity() {
+    private lateinit var terminal: TerminalView
     private lateinit var status: TextView
-    private lateinit var output: TextView
-    private lateinit var input: EditText
+    private lateinit var client: TerminalClient
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 24, 24, 24)
         }
         status = TextView(this).apply {
             text = "idle"
-            textSize = 14f
-        }
-        output = TextView(this).apply {
-            typeface = android.graphics.Typeface.MONOSPACE
             textSize = 12f
-            setTextIsSelectable(true)
+            setPadding(24, 12, 24, 12)
         }
-        val scroll = ScrollView(this).apply {
-            addView(output, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        terminal = TerminalView(this, null).apply {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1f,
             )
+            // The renderer only paints non-default cell backgrounds; the view
+            // itself must supply the terminal's default background. Termux's
+            // dark theme does this for its own activity.
+            setBackgroundColor(0xFF000000.toInt())
+            isFocusable = true
+            isFocusableInTouchMode = true
         }
-        input = EditText(this).apply {
-            hint = "command (when the guest provides a shell)"
-            inputType = InputType.TYPE_CLASS_TEXT
-        }
-        val send = Button(this).apply {
-            text = "Send"
-            setOnClickListener {
-                val line = input.text.toString()
-                if (line.isNotEmpty()) {
-                    GuestRuntime.send(line)
-                    input.setText("")
-                }
-            }
-        }
+        client = TerminalClient(this, terminal)
+        terminal.setTextSize(14)
+
         val boot = Button(this).apply {
-            text = "Boot demo"
-            setOnClickListener {
-                startForegroundService()
-                Thread({ GuestRuntime.start(this@MainActivity) }, "drolin-start").start()
-            }
+            text = "Boot Ubuntu"
+            setOnClickListener { bootGuest() }
         }
         val stop = Button(this).apply {
             text = "Stop"
             setOnClickListener {
-                GuestRuntime.stop()
+                GuestSession.stop()
                 stopService(Intent(this@MainActivity, GuestService::class.java))
+                status.text = "stopped"
             }
         }
+        val toolbar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(boot)
+            addView(stop)
+        }
 
+        root.addView(toolbar)
         root.addView(status)
-        root.addView(scroll)
-        root.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                addView(send)
-            }
-        )
-        root.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                addView(boot)
-                addView(stop)
-            }
-        )
+        root.addView(terminal)
         setContentView(root)
 
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -97,33 +74,49 @@ class MainActivity : Activity(), GuestRuntime.Listener {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+
+        GuestSession.attach(this, terminal, client)
+        if (!GuestSession.isRunning) {
+            bootGuest()
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        GuestRuntime.attach(this)
+        GuestSession.attach(this, terminal, client)
     }
 
-    override fun onPause() {
-        GuestRuntime.detach(this)
-        super.onPause()
+    override fun onDestroy() {
+        GuestSession.detach()
+        super.onDestroy()
     }
 
-    override fun onOutput(text: String) {
+    fun onSessionState(text: String) {
         runOnUiThread {
-            output.append(text)
-            (output.parent as? ScrollView)?.post {
-                (output.parent as? ScrollView)?.fullScroll(ScrollView.FOCUS_DOWN)
+            status.text = text
+            if (text.startsWith("guest") || text.startsWith("booting")) {
+                val intent = Intent(this, GuestService::class.java)
+                    .setAction(GuestService.ACTION_START)
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
             }
         }
     }
 
-    override fun onState(text: String) {
-        runOnUiThread { status.text = text }
+    fun onSessionFinished() {
+        GuestSession.onSessionFinished()
+        runOnUiThread {
+            status.text = "guest stopped"
+            stopService(Intent(this, GuestService::class.java))
+        }
     }
 
-    private fun startForegroundService() {
-        val intent = Intent(this, GuestService::class.java).setAction(GuestService.ACTION_START)
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+    private fun bootGuest() {
+        Thread({
+            try {
+                GuestSession.start(this, terminal, client)
+            } catch (error: Exception) {
+                onSessionState("boot failed: ${error.message}")
+            }
+        }, "drolin-boot").start()
     }
 }
