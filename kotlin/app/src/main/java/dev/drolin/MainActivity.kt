@@ -2,6 +2,7 @@ package dev.drolin
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -11,8 +12,13 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.widget.ArrayAdapter
+import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import com.termux.view.TerminalView
 
 class MainActivity : Activity() {
@@ -137,6 +143,100 @@ class MainActivity : Activity() {
             val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
             imm.showSoftInput(terminal, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
         }
+    }
+
+    fun showTerminalMenu() {
+        // A PopupMenu anchored to the full-screen TerminalView is placed under
+        // the navigation bar on edge-to-edge devices. A dialog list is the same
+        // menu semantics without the clipping.
+        AlertDialog.Builder(this)
+            .setTitle("More")
+            .setItems(arrayOf("Settings")) { _, _ -> showSettings() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showSettings() {
+        val cpus = intArrayOf(1, 2, 4, 8)
+        val memory = intArrayOf(256, 512, 1024, 2048)
+        val storage = intArrayOf(1, 2, 4, 8)
+
+        fun spinner(values: IntArray, labels: List<String>, selected: Int): Spinner =
+            Spinner(this).apply {
+                adapter = ArrayAdapter(
+                    this@MainActivity,
+                    android.R.layout.simple_spinner_dropdown_item,
+                    labels,
+                )
+                setSelection(values.indexOf(selected).let { if (it < 0) 0 else it })
+            }
+
+        val cpu = spinner(cpus, cpus.map { it.toString() }, GuestSettings.cpus(this))
+        val mem = spinner(
+            memory,
+            memory.map { if (it < 1024) "$it MiB" else "${it / 1024} GiB" },
+            GuestSettings.memoryMib(this),
+        )
+        val disk = spinner(storage, storage.map { "$it GB" }, 2)
+        val current = TextView(this).apply {
+            text = "Current rootfs: ${GuestSettings.currentBytes(this@MainActivity) / (1024 * 1024)} MiB"
+            setPadding(0, 12, 0, 12)
+        }
+        val expand = Button(this).apply {
+            text = "Expand sparse storage"
+            setOnClickListener {
+                if (GuestSession.isRunning) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Stop the guest first (exit or poweroff)",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    return@setOnClickListener
+                }
+                val gib = storage[disk.selectedItemPosition]
+                GuestSettings.expandStorage(this@MainActivity, gib)
+                    .onSuccess {
+                        current.text = "Current rootfs: ${it / (1024 * 1024)} MiB"
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Expanded to $gib GB; systemd grows ext4 on next boot",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    .onFailure {
+                        Toast.makeText(this@MainActivity, it.message, Toast.LENGTH_LONG).show()
+                    }
+            }
+        }
+
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 12, 36, 12)
+            addView(TextView(this@MainActivity).apply { text = "CPU count" })
+            addView(cpu)
+            addView(TextView(this@MainActivity).apply { text = "Memory" })
+            addView(mem)
+            addView(TextView(this@MainActivity).apply { text = "Storage size" })
+            addView(disk)
+            addView(current)
+            addView(expand)
+        }
+        val scroll = ScrollView(this).apply { addView(content) }
+
+        AlertDialog.Builder(this)
+            .setTitle("Settings")
+            .setView(scroll)
+            .setPositiveButton("Save") { _, _ ->
+                GuestSettings.setCpus(this, cpus[cpu.selectedItemPosition])
+                GuestSettings.setMemoryMib(this, memory[mem.selectedItemPosition])
+                Toast.makeText(
+                    this,
+                    "CPU and memory apply on the next boot",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun bootGuest() {

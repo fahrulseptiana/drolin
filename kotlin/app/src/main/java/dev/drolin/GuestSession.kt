@@ -76,7 +76,8 @@ object GuestSession {
             val args = mutableListOf(
                 "drolin", "run", "--inherit",
                 "--kernel", kernel.absolutePath,
-                "--memory", "512",
+                "--memory", GuestSettings.memoryMib(activity).toString(),
+                "--cpus", GuestSettings.cpus(activity).toString(),
             )
             if (rootfs.isFile) {
                 args += listOf("--rootfs", rootfs.absolutePath, "--init", "/sbin/init")

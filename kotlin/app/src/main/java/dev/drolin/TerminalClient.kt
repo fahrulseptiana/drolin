@@ -108,6 +108,10 @@ class TerminalClient(
     }
     override fun onKeyUp(keyCode: Int, e: KeyEvent): Boolean = false
     override fun onLongPress(event: MotionEvent): Boolean = false
+
+    override fun onMorePressed() {
+        activity.showTerminalMenu()
+    }
     override fun readControlKey(): Boolean = false
     override fun readAltKey(): Boolean = false
     override fun readShiftKey(): Boolean = false

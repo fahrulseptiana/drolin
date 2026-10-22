@@ -53,6 +53,9 @@ public interface TerminalViewClient {
 
     boolean onLongPress(MotionEvent event);
 
+    /** Called when the user chooses More in the text-selection action mode. */
+    default void onMorePressed() {}
+
 
 
     boolean readControlKey();

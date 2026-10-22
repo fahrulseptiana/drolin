@@ -78,7 +78,7 @@ apt_install systemd >/dev/null 2>&1 || true
 as_root sed -i 's|^systemd-machine-id-setup.*|true|' \
     "$ROOT/var/lib/dpkg/info/systemd.postinst"
 as_root chroot "$ROOT" env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
-apt_install systemd-sysv dbus udev iproute2 iputils-ping curl
+apt_install systemd-sysv dbus udev iproute2 iputils-ping curl e2fsprogs
 as_root chroot "$ROOT" apt-get clean
 as_root rm -rf "$ROOT/var/cache/apt"/* "$ROOT/var/lib/apt/lists"/*
 
@@ -172,6 +172,24 @@ UNIT
 as_root mkdir -p "$ROOT/etc/systemd/system/multi-user.target.wants"
 as_root ln -sf ../drolin-marker.service \
     "$ROOT/etc/systemd/system/multi-user.target.wants/drolin-marker.service"
+
+# The app extends the rootfs file sparsely; resize2fs grows ext4 online at boot.
+as_root tee "$ROOT/etc/systemd/system/drolin-growfs.service" >/dev/null <<'GROWFS'
+[Unit]
+Description=Grow the root filesystem to the disk size
+After=local-fs.target
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=-/sbin/resize2fs /dev/ubda
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+GROWFS
+as_root ln -sf ../drolin-growfs.service \
+    "$ROOT/etc/systemd/system/multi-user.target.wants/drolin-growfs.service"
 
 # mke2fs -d uses listxattr() on each entry, which follows symlinks. Absolute
 # symlinks point at the build host, and dangling ones fail the copy.
