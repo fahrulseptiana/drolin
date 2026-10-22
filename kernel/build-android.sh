@@ -92,7 +92,7 @@ grep -q '^CONFIG_PAGE_SIZE_16KB=y' "$OUT/.config" || {
 # shellcheck disable=SC2086
 $MAKE "${HOST_ARGS[@]}" -j"$JOBS"
 
-cp -f "$OUT/linux" "$DIST/linux-um-aarch64"
-cp -f "$OUT/arch/um/kernel/skas/stub_exe" "$DIST/stub_exe-aarch64"
-echo "wrote $DIST/linux-um-aarch64 (bionic, API $API)"
-file "$DIST/linux-um-aarch64" || true
+cp -f "$OUT/linux" "$DIST/linux-um-aarch64-android"
+cp -f "$OUT/arch/um/kernel/skas/stub_exe" "$DIST/stub_exe-aarch64-android"
+echo "wrote $DIST/linux-um-aarch64-android (bionic, API $API)"
+file "$DIST/linux-um-aarch64-android" || true

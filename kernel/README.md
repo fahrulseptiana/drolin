@@ -23,6 +23,11 @@ without a second source tree.
 The Rust engine does not assume either architecture: it probes the ELF header
 and validates it against the host at runtime.
 
+The minimal config enables `CONFIG_UML_NET_VECTOR=y`. It is compatible with
+`CONFIG_STATIC_LINK=y` because the arm64 patch removes the over-broad
+`select MAY_HAVE_RUNTIME_DEPS`; the vector `fd` transport does not resolve
+hostnames.
+
 ## Android
 
 `build-android.sh` produces the same guest for an app. It links statically
@@ -33,4 +38,4 @@ seccomp filter before it can print anything.
 NDK=/path/to/ndk ./build-android.sh
 ```
 
-Outputs `dist/linux-um-aarch64` and `dist/stub_exe-aarch64`.
+Outputs `dist/linux-um-aarch64-android` and `dist/stub_exe-aarch64-android`.
