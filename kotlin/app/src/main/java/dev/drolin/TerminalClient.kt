@@ -85,7 +85,10 @@ class TerminalClient(
     }
 
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false
-    override fun shouldEnforceCharBasedInput(): Boolean = true
+    // Termux defaults to raw key events (TYPE_NULL). Forcing character-based
+    // input makes many IMEs compose text locally, which delays what reaches the
+    // terminal even though the guest eventually receives the same bytes.
+    override fun shouldEnforceCharBasedInput(): Boolean = false
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
     override fun isTerminalViewSelected(): Boolean = true
     override fun copyModeChanged(copyMode: Boolean) = Unit
