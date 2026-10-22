@@ -9,6 +9,7 @@ pub mod elf;
 pub mod host;
 pub mod image;
 pub mod launch;
+pub mod net;
 pub mod paths;
 
 pub use doctor::{Check, Diagnosis, Status};
@@ -16,4 +17,5 @@ pub use elf::{ElfError, KernelInfo};
 pub use host::host_facts;
 pub use image::{ImageError, ImageStore};
 pub use launch::{LaunchError, LaunchOptions, Outcome};
+pub use net::{NetError, Network};
 pub use paths::DataRoot;

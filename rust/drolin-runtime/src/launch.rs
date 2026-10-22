@@ -46,6 +46,8 @@ pub enum LaunchError {
     Io(#[from] io::Error),
     #[error("invalid session transition: {0}")]
     State(#[from] TransitionError),
+    #[error("network setup failed: {0}")]
+    Network(#[from] crate::net::NetError),
 }
 
 /// Start a guest, forward its output, and wait for it.
@@ -73,10 +75,14 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        let mut network = attach_network(plan, &mut command)?;
         let mut child = command.spawn().map_err(|source| LaunchError::Spawn {
             path: plan.executable.clone(),
             source,
         })?;
+        if let Some(network) = network.as_mut() {
+            network.release_guest_fd();
+        }
         let started = Instant::now();
         let (status, timed_out) = wait_with_timeout(&mut child, options.timeout)?;
         let mut state = SessionState::Idle.start()?.mark_running()?;
@@ -116,6 +122,7 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
 
     let mut command = Command::new(&plan.executable);
     command.args(&plan.args);
+    let mut network = attach_network(plan, &mut command)?;
 
     let done = Arc::new(AtomicBool::new(false));
     if options.pty {
@@ -130,6 +137,9 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
             path: plan.executable.clone(),
             source,
         })?;
+        if let Some(network) = network.as_mut() {
+            network.release_guest_fd();
+        }
 
         let read_master = master.try_clone()?;
         let write_master = master;
@@ -161,6 +171,9 @@ pub fn run(plan: &BootPlan, options: &LaunchOptions) -> Result<Outcome, LaunchEr
             path: plan.executable.clone(),
             source,
         })?;
+        if let Some(network) = network.as_mut() {
+            network.release_guest_fd();
+        }
         let tail_path = log_path.clone();
         let done_for_tail = done.clone();
         let scanner_for_tail = scanner.clone();
@@ -290,6 +303,18 @@ fn pump_stdin(mut master: File) {
             Err(_) => return,
         }
     }
+}
+
+fn attach_network(
+    plan: &BootPlan,
+    command: &mut Command,
+) -> Result<Option<crate::net::Network>, LaunchError> {
+    let Some(config) = &plan.spec.network else {
+        return Ok(None);
+    };
+    let network = crate::net::Network::start(config)?;
+    command.arg(network.kernel_arg(&config.mac));
+    Ok(Some(network))
 }
 
 fn wait_with_timeout(
