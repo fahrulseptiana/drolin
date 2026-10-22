@@ -5,6 +5,30 @@ use serde::{Deserialize, Serialize};
 /// UML's vector `fd` transport carries one Ethernet frame per datagram. passt
 /// speaks qemu's length-prefixed stream protocol, so the runtime owns a small
 /// bridge between them. None of this needs a tap device or any capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardProtocol {
+    Tcp,
+    Udp,
+}
+
+impl ForwardProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
+/// A host port exposed to the guest through passt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortForward {
+    pub protocol: ForwardProtocol,
+    pub host_port: u16,
+    pub guest_port: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Path to the passt executable.
@@ -16,6 +40,9 @@ pub struct NetworkConfig {
     pub dns: Option<String>,
     /// Optional host interface to mirror (`passt -i`).
     pub interface: Option<String>,
+    /// Host-to-guest port forwards (`passt -t`/`-u`).
+    #[serde(default)]
+    pub forwards: Vec<PortForward>,
 }
 
 impl Default for NetworkConfig {
@@ -28,6 +55,7 @@ impl Default for NetworkConfig {
             gateway: "10.0.2.2".into(),
             dns: Some("1.1.1.1".into()),
             interface: None,
+            forwards: Vec::new(),
         }
     }
 }

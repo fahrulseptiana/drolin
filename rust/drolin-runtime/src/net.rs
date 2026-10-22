@@ -79,10 +79,6 @@ impl Network {
             "-f".to_owned(),
             "-F".to_owned(),
             fd_arg,
-            "-t".to_owned(),
-            "none".to_owned(),
-            "-u".to_owned(),
-            "none".to_owned(),
             "-4".to_owned(),
             "-a".to_owned(),
             config.address.clone(),
@@ -98,6 +94,34 @@ impl Network {
         if let Some(interface) = &config.interface {
             args.push("-i".into());
             args.push(interface.clone());
+        }
+        let tcp: Vec<_> = config
+            .forwards
+            .iter()
+            .filter(|f| f.protocol == drolin_core::ForwardProtocol::Tcp)
+            .collect();
+        let udp: Vec<_> = config
+            .forwards
+            .iter()
+            .filter(|f| f.protocol == drolin_core::ForwardProtocol::Udp)
+            .collect();
+        if tcp.is_empty() {
+            args.push("-t".into());
+            args.push("none".into());
+        } else {
+            for forward in tcp {
+                args.push("-t".into());
+                args.push(format!("{}:{}", forward.host_port, forward.guest_port));
+            }
+        }
+        if udp.is_empty() {
+            args.push("-u".into());
+            args.push("none".into());
+        } else {
+            for forward in udp {
+                args.push("-u".into());
+                args.push(format!("{}:{}", forward.host_port, forward.guest_port));
+            }
         }
         let child = Command::new(&config.passt)
             .args(&args)

@@ -16,7 +16,7 @@ mod target;
 pub use boot::{BootPlan, KernelArg};
 pub use image::{Compression, ImageRef, ImageSet};
 pub use marker::MarkerScanner;
-pub use net::NetworkConfig;
+pub use net::{ForwardProtocol, NetworkConfig, PortForward};
 pub use session::{SessionState, TransitionError};
 pub use spec::{BootMode, ConsoleMode, GuestSpec, Issue, Severity, Share, Validation};
 pub use target::{Arch, HostFacts};

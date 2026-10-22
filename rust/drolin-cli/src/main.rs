@@ -7,7 +7,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use drolin_core::{
-    BootMode, BootPlan, ConsoleMode, GuestSpec, ImageSet, NetworkConfig, Share, Validation,
+    BootMode, BootPlan, ConsoleMode, ForwardProtocol, GuestSpec, ImageSet, NetworkConfig,
+    PortForward, Share, Validation,
 };
 use drolin_runtime::doctor;
 use drolin_runtime::elf;
@@ -49,6 +50,7 @@ Boot options:
   --net-gw GW               gateway, default 10.0.2.2
   --net-dns DNS             DHCP nameserver, default 1.1.1.1
   --net-iface IFACE         host interface to mirror
+  --forward SPEC            forward tcp:HPORT:GPort or udp:HPORT:GPort
   --arg VALUE               extra kernel argument (repeatable)
   --json                    machine-readable output
 
@@ -344,6 +346,12 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
             "--net-iface" => {
                 ensure_network(&mut common.spec).interface = Some(take_value(args, &mut index)?);
             }
+            "--forward" => {
+                let value = take_value(args, &mut index)?;
+                ensure_network(&mut common.spec)
+                    .forwards
+                    .push(parse_forward(&value)?);
+            }
             "--arg" => common.spec.extra_args.push(take_value(args, &mut index)?),
             "--timeout" => {
                 let seconds: u64 = parse_number(&take_value(args, &mut index)?, "--timeout")?;
@@ -366,6 +374,41 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
         index += 1;
     }
     Ok((common, run))
+}
+
+fn parse_forward(value: &str) -> Result<PortForward, CliError> {
+    let mut parts = value.split(':');
+    let protocol = match parts.next() {
+        Some("tcp") => ForwardProtocol::Tcp,
+        Some("udp") => ForwardProtocol::Udp,
+        other => {
+            return Err(CliError::Usage(format!(
+                "--forward expects tcp:HPORT:GPort or udp:HPORT:GPort, got {other:?}"
+            )));
+        }
+    };
+    let host_port = parse_number::<u16>(
+        parts
+            .next()
+            .ok_or_else(|| CliError::Usage("--forward is missing the host port".into()))?,
+        "--forward host port",
+    )?;
+    let guest_port = parse_number::<u16>(
+        parts
+            .next()
+            .ok_or_else(|| CliError::Usage("--forward is missing the guest port".into()))?,
+        "--forward guest port",
+    )?;
+    if parts.next().is_some() || host_port == 0 || guest_port == 0 {
+        return Err(CliError::Usage(format!(
+            "invalid --forward value {value:?}"
+        )));
+    }
+    Ok(PortForward {
+        protocol,
+        host_port,
+        guest_port,
+    })
 }
 
 fn ensure_network(spec: &mut GuestSpec) -> &mut NetworkConfig {
