@@ -146,7 +146,7 @@ echo "compiling Kotlin"
     -jvm-target 11 \
     -classpath "$ANDROID_JAR:$BUILD/gen:$BUILD/classes:$KOTLIN_HOME/lib/kotlin-stdlib.jar" \
     -d "$BUILD/classes" \
-    "$APP"/java/dev/drolin/*.kt
+    "$APP"/java/id/fahrul/drolin/*.kt
 
 echo "compiling the Termux pty shim"
 "$NDK/toolchains/llvm/prebuilt/$NDK_HOST/bin/${RUST_TARGET}26-clang" \

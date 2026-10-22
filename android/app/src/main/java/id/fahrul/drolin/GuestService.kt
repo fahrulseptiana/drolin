@@ -1,4 +1,4 @@
-package dev.drolin
+package id.fahrul.drolin
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -72,7 +72,7 @@ class GuestService : Service() {
     companion object {
         const val CHANNEL = "guest"
         const val ID = 1
-        const val ACTION_START = "dev.drolin.action.START"
-        const val ACTION_STOP = "dev.drolin.action.STOP"
+        const val ACTION_START = "id.fahrul.drolin.action.START"
+        const val ACTION_STOP = "id.fahrul.drolin.action.STOP"
     }
 }

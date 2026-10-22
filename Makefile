@@ -31,7 +31,7 @@ passt-android:
 	MODE=android ./net/build-passt.sh
 
 apk:
-	./kotlin/build-apk.sh
+	./android/build-apk.sh
 
 run-demo: build guest
 	./target/release/drolin run \
@@ -50,4 +50,4 @@ run-ubuntu: build
 
 clean:
 	cargo clean
-	rm -rf images/dist images/build kernel/build kernel/build-android kernel/dist kotlin/build kotlin/dist
+	rm -rf images/dist images/build kernel/build kernel/build-android kernel/dist android/build android/dist

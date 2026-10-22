@@ -89,8 +89,8 @@ jobs:
           STUB=kernel/dist/stub_exe-aarch64-android \
           PASST=net/dist/passt-android \
           ROOTFS=images/dist/ubuntu-26.04.1-arm64.ext4 \
-          ./kotlin/build-apk.sh
+          ./android/build-apk.sh
       - uses: actions/upload-artifact@v4
         with:
           name: drolin-apk
-          path: kotlin/dist/drolin.apk
+          path: android/dist/drolin.apk

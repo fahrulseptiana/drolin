@@ -1,4 +1,4 @@
-package dev.drolin
+package id.fahrul.drolin
 
 import android.content.ClipData
 import android.content.ClipboardManager

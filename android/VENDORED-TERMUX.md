@@ -14,7 +14,7 @@ work; the Rust engine and kernel patch remain GPL-2.0-only and communicate with
 the app by exec, not by linking.
 
 Local changes:
-* `com.termux.view.R` imports point at the app's `dev.drolin.R`, because this is
+* `com.termux.view.R` imports point at the app's `id.fahrul.drolin.R`, because this is
   one APK with one resource namespace rather than two Gradle library modules.
 * The four `androidx.annotation` usages are satisfied by three local annotation
   stubs, so the app has no AndroidX dependency.

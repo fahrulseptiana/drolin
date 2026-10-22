@@ -7,7 +7,7 @@ that share one engine:
 | --- | --- | --- |
 | `rust/` | Rust | planning, validation, host probes, image storage, process lifecycle, guest init |
 | `kernel/` | shell + Kconfig | pinned stable mainline source, arm64 UML patch, host and Android builds |
-| `kotlin/` | Kotlin | Android app: UI, foreground service, packaged engine and Ubuntu image |
+| `android/` | Kotlin | Android app: UI, foreground service, packaged engine and Ubuntu image |
 
 The engine is the only place that knows what a boot is. The CLI and the Android
 app are adapters; neither re-implements kernel arguments or validation.
@@ -65,8 +65,8 @@ repeated `--forward tcp:8080:80` options. See `net/README.md`.
 ```sh
 # Linux host with Android SDK + NDK:
 NDK=/path/to/ndk ./kernel/build-android.sh
-ANDROID_HOME=/path/to/sdk ./kotlin/build-apk.sh
-adb install -r kotlin/dist/drolin.apk
+ANDROID_HOME=/path/to/sdk ./android/build-apk.sh
+adb install -r android/dist/drolin.apk
 ```
 
 The APK bundles the bionic kernel, the standalone stub, a demo initramfs and
@@ -85,7 +85,7 @@ rust/drolin-cli       the `drolin` binary
 rust/drolin-init      guest /init and drolin-poweroff
 kernel/               pinned source, verification, UML builds
 images/               root filesystem and initramfs builders
-kotlin/               Android app and SDK-tool build script
+android/              Android app and SDK-tool build script
 docs/                 architecture and rationale
 ```
 

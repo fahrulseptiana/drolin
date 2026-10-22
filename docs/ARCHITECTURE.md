@@ -142,7 +142,7 @@ memfd. The engine, kernel and stub are therefore shipped as `lib*.so` files in
 are ordinary executables with a library-shaped name.
 
 The console is a real pty. The app vendors Termux's `terminal-emulator` and
-`terminal-view` (Apache-2.0; see `kotlin/VENDORED-TERMUX.md`) and runs the Rust
+`terminal-view` (Apache-2.0; see `android/VENDORED-TERMUX.md`) and runs the Rust
 engine through `TerminalSession`, which creates the pty. The engine is started
 with `--inherit`, so UML's `con0=fd:0,fd:1` is that pty. The view is focusable
 in touch mode and has the terminal's black background set explicitly; the
