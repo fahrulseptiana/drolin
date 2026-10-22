@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use drolin_core::{BootMode, BootPlan, ConsoleMode, GuestSpec, ImageSet, Share, Validation};
+use drolin_core::{
+    BootMode, BootPlan, ConsoleMode, GuestSpec, ImageSet, NetworkConfig, Share, Validation,
+};
 use drolin_runtime::doctor;
 use drolin_runtime::elf;
 use drolin_runtime::image::ImageStore;
@@ -39,6 +41,14 @@ Boot options:
   --console MODE            stdio (default), pty, none
   --mode MODE               ptrace (default), nosysemu, seccomp
   --guest-page-size KIB     tell the planner the guest page size
+  --net                     enable userspace networking through passt
+  --passt PATH              passt executable (implies --net)
+  --net-mac MAC             guest MAC, default 02:00:00:00:00:01
+  --net-addr ADDR           guest address, default 10.0.2.15
+  --net-mask MASK           prefix length, default 24
+  --net-gw GW               gateway, default 10.0.2.2
+  --net-dns DNS             DHCP nameserver, default 1.1.1.1
+  --net-iface IFACE         host interface to mirror
   --arg VALUE               extra kernel argument (repeatable)
   --json                    machine-readable output
 
@@ -310,6 +320,30 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
                     "--guest-page-size",
                 )?)
             }
+            "--net" => {
+                ensure_network(&mut common.spec);
+            }
+            "--passt" => {
+                ensure_network(&mut common.spec).passt = take_value(args, &mut index)?;
+            }
+            "--net-mac" => {
+                ensure_network(&mut common.spec).mac = take_value(args, &mut index)?;
+            }
+            "--net-addr" => {
+                ensure_network(&mut common.spec).address = take_value(args, &mut index)?;
+            }
+            "--net-mask" => {
+                ensure_network(&mut common.spec).netmask = take_value(args, &mut index)?;
+            }
+            "--net-gw" => {
+                ensure_network(&mut common.spec).gateway = take_value(args, &mut index)?;
+            }
+            "--net-dns" => {
+                ensure_network(&mut common.spec).dns = Some(take_value(args, &mut index)?);
+            }
+            "--net-iface" => {
+                ensure_network(&mut common.spec).interface = Some(take_value(args, &mut index)?);
+            }
             "--arg" => common.spec.extra_args.push(take_value(args, &mut index)?),
             "--timeout" => {
                 let seconds: u64 = parse_number(&take_value(args, &mut index)?, "--timeout")?;
@@ -332,6 +366,13 @@ fn parse_common(args: &[String]) -> Result<(Common, RunOptions), CliError> {
         index += 1;
     }
     Ok((common, run))
+}
+
+fn ensure_network(spec: &mut GuestSpec) -> &mut NetworkConfig {
+    if spec.network.is_none() {
+        spec.network = Some(NetworkConfig::default());
+    }
+    spec.network.as_mut().expect("network was just set")
 }
 
 fn take_value(args: &[String], index: &mut usize) -> Result<String, CliError> {

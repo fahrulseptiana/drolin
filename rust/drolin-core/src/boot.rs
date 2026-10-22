@@ -171,6 +171,7 @@ mod tests {
             mode: BootMode::Seccomp,
             guest_page_size_kib: Some(16),
             extra_args: vec!["quiet".into()],
+            network: None,
         }
     }
 

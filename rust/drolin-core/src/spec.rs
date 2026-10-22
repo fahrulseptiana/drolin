@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::net::NetworkConfig;
 use crate::target::{Arch, HostFacts};
 
 /// What the guest should use as its console.
@@ -83,6 +84,8 @@ pub struct GuestSpec {
     pub guest_page_size_kib: Option<u32>,
     /// Extra kernel arguments. Arguments that the planner owns are rejected.
     pub extra_args: Vec<String>,
+    /// Optional userspace network through passt.
+    pub network: Option<NetworkConfig>,
 }
 
 impl Default for GuestSpec {
@@ -101,6 +104,7 @@ impl Default for GuestSpec {
             mode: BootMode::Ptrace,
             guest_page_size_kib: None,
             extra_args: Vec::new(),
+            network: None,
         }
     }
 }
@@ -222,6 +226,12 @@ impl GuestSpec {
             }
         }
 
+        if let Some(network) = &self.network {
+            for problem in network.problems() {
+                issues.push(Issue::error("network.invalid", problem));
+            }
+        }
+
         if let Some(host) = host {
             if let Some(machine) = host.arch.elf_machine() {
                 let _ = machine;
@@ -266,6 +276,7 @@ fn is_reserved_key(key: &str) -> bool {
             | "init"
             | "stub_exe"
             | "hostfs"
+            | "vec0"
             | "seccomp"
             | "nosysemu"
             | "panic"
