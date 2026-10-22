@@ -30,7 +30,8 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.BLACK)
         }
         status = TextView(this).apply {
-            text = "booting Ubuntu 26.04"
+            text = ""
+            visibility = View.GONE
             textSize = 12f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.BLACK)
@@ -107,11 +108,15 @@ class MainActivity : Activity() {
 
     fun onSessionState(text: String) {
         runOnUiThread {
-            status.text = if (text == "guest stopped") "guest stopped (tap to boot)" else text
-            status.visibility = when {
-                text.startsWith("guest running") -> View.GONE
-                text.startsWith("guest already running") -> View.GONE
-                else -> View.VISIBLE
+            val startup = text.startsWith("preparing") ||
+                text.startsWith("booting") ||
+                text.startsWith("guest running") ||
+                text.startsWith("guest already running")
+            if (startup) {
+                status.visibility = View.GONE
+            } else {
+                status.text = if (text == "guest stopped") "guest stopped (tap to boot)" else text
+                status.visibility = View.VISIBLE
             }
             if (text.startsWith("guest running")) showKeyboard()
         }
