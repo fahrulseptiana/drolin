@@ -115,6 +115,10 @@ outbound sockets, which an app may open with the `INTERNET` permission.
 The guest image enables systemd-networkd with DHCP on `vec0`. It receives
 `10.0.2.15/24`, a route through `10.0.2.2`, and DNS `1.1.1.1`.
 
+Host-to-guest forwarding is passed to passt as `-t host:guest` (TCP) and
+`-u host:guest` (UDP). The app persists the list and passes repeated
+`--forward tcp:8080:80` options; a restart applies them.
+
 `net/build-passt.sh` builds a static host binary and, with `MODE=android`, a
 bionic binary for the APK. The Android build applies the pinned bionic patch.
 

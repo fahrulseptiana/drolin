@@ -40,6 +40,13 @@ the whole configuration instead:
 passt still reaches the network through ordinary outbound sockets, which is why
 this works without root.
 
+## Port forwarding
+
+`passt -t host:guest` / `-u host:guest` exposes guest TCP/UDP ports on the
+Android host. The engine accepts repeated `--forward tcp:8080:80` flags; the
+app persists the same list and applies it on the next boot. Host ports below
+1024 need root and are rejected by the app.
+
 ## Guest side
 
 The Ubuntu image runs systemd-networkd with DHCP on `vec0`. passt is the DHCP

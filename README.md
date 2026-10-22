@@ -57,7 +57,8 @@ cargo run -p drolin-cli -- run \
 ```
 
 The guest interface is `vec0`; systemd-networkd obtains `10.0.2.15/24` from
-passt and uses `1.1.1.1` for DNS. See `net/README.md`.
+passt and uses `1.1.1.1` for DNS. Host-to-guest ports can be forwarded with
+repeated `--forward tcp:8080:80` options. See `net/README.md`.
 
 ## Android
 
