@@ -86,7 +86,12 @@ object GuestSession {
                 args += listOf("--initramfs", initramfs.absolutePath)
             }
             if (stub.canExecute()) args += listOf("--stub-exe", stub.absolutePath)
-            if (passt.canExecute()) args += listOf("--net", "--passt", passt.absolutePath)
+            if (passt.canExecute()) {
+                args += listOf("--net", "--passt", passt.absolutePath)
+                GuestSettings.forwards(activity).forEach {
+                    args += listOf("--forward", it.engineArg())
+                }
+            }
 
             val env = arrayOf(
                 "DROLIN_HOME=${activity.filesDir.absolutePath}",

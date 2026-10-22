@@ -9,6 +9,12 @@ object GuestSettings {
     private const val PREFS = "drolin-guest"
     private const val KEY_CPUS = "cpus"
     private const val KEY_MEMORY = "memory_mib"
+    private const val KEY_FORWARDS = "forwards"
+
+    data class PortForward(val protocol: String, val hostPort: Int, val guestPort: Int) {
+        override fun toString(): String = "$protocol $hostPort -> $guestPort"
+        fun engineArg(): String = "$protocol:$hostPort:$guestPort"
+    }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -23,6 +29,39 @@ object GuestSettings {
 
     fun setMemoryMib(context: Context, value: Int) {
         prefs(context).edit().putInt(KEY_MEMORY, value).apply()
+    }
+
+    fun forwards(context: Context): List<PortForward> =
+        prefs(context).getString(KEY_FORWARDS, "").orEmpty()
+            .lineSequence()
+            .mapNotNull { line ->
+                val parts = line.split(':')
+                if (parts.size != 3) return@mapNotNull null
+                val host = parts[1].toIntOrNull() ?: return@mapNotNull null
+                val guest = parts[2].toIntOrNull() ?: return@mapNotNull null
+                PortForward(parts[0], host, guest)
+            }
+            .toList()
+
+    fun addForward(context: Context, protocol: String, hostPort: Int, guestPort: Int): Result<Unit> = runCatching {
+        require(protocol == "tcp" || protocol == "udp") { "protocol must be tcp or udp" }
+        require(hostPort in 1024..65535) { "host port must be 1024..65535" }
+        require(guestPort in 1..65535) { "guest port must be 1..65535" }
+        val next = forwards(context).toMutableList()
+        require(next.none { it.protocol == protocol && it.hostPort == hostPort }) {
+            "host port $hostPort/$protocol is already forwarded"
+        }
+        next += PortForward(protocol, hostPort, guestPort)
+        prefs(context).edit()
+            .putString(KEY_FORWARDS, next.joinToString("\n") { it.engineArg() })
+            .apply()
+    }
+
+    fun removeForward(context: Context, forward: PortForward) {
+        val next = forwards(context).filterNot { it == forward }
+        prefs(context).edit()
+            .putString(KEY_FORWARDS, next.joinToString("\n") { it.engineArg() })
+            .apply()
     }
 
     fun rootfs(context: Context): File = File(context.filesDir, "rootfs.ext4")

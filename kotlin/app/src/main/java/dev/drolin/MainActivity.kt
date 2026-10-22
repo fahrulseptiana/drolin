@@ -8,12 +8,14 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -151,8 +153,103 @@ class MainActivity : Activity() {
         // menu semantics without the clipping.
         AlertDialog.Builder(this)
             .setTitle("More")
-            .setItems(arrayOf("Settings")) { _, _ -> showSettings() }
+            .setItems(arrayOf("Settings", "Port Forwarding")) { _, which ->
+                if (which == 0) showSettings() else showPortForwarding()
+            }
             .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showPortForwarding() {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(36, 12, 36, 12)
+        }
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val protocol = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf("TCP", "UDP"),
+            )
+        }
+        val host = EditText(this).apply {
+            hint = "host port (>= 1024)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            filters = arrayOf(android.text.InputFilter.LengthFilter(5))
+        }
+        val guest = EditText(this).apply {
+            hint = "guest port"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            filters = arrayOf(android.text.InputFilter.LengthFilter(5))
+        }
+        fun refresh() {
+            list.removeAllViews()
+            val forwards = GuestSettings.forwards(this)
+            if (forwards.isEmpty()) {
+                list.addView(TextView(this).apply { text = "No forwards" })
+            }
+            for (forward in forwards) {
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                row.addView(
+                    TextView(this).apply { text = forward.toString() },
+                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
+                )
+                row.addView(Button(this).apply {
+                    text = "Remove"
+                    setOnClickListener {
+                        GuestSettings.removeForward(this@MainActivity, forward)
+                        refresh()
+                    }
+                })
+                list.addView(row)
+            }
+        }
+        val add = Button(this).apply {
+            text = "Add forward"
+            setOnClickListener {
+                val proto = if (protocol.selectedItemPosition == 0) "tcp" else "udp"
+                val hostPort = host.text.toString().toIntOrNull()
+                val guestPort = guest.text.toString().toIntOrNull()
+                if (hostPort == null || guestPort == null) {
+                    Toast.makeText(this@MainActivity, "Enter both ports", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                GuestSettings.addForward(this@MainActivity, proto, hostPort, guestPort)
+                    .onSuccess {
+                        host.setText("")
+                        guest.setText("")
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Forward added; restart the guest to apply",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                        refresh()
+                    }
+                    .onFailure {
+                        Toast.makeText(this@MainActivity, it.message, Toast.LENGTH_LONG).show()
+                    }
+            }
+        }
+        content.addView(TextView(this).apply { text = "Active forwards" })
+        content.addView(list)
+        content.addView(TextView(this).apply { text = "Add TCP/UDP forward" })
+        content.addView(protocol)
+        content.addView(host)
+        content.addView(guest)
+        content.addView(add)
+        content.addView(TextView(this).apply {
+            text = "Host ports are on the Android side. Ports below 1024 need root."
+        })
+        refresh()
+
+        AlertDialog.Builder(this)
+            .setTitle("Port Forwarding")
+            .setView(ScrollView(this).apply { addView(content) })
+            .setPositiveButton("Close", null)
             .show()
     }
 
