@@ -24,3 +24,8 @@
 /kernel/cache
 /images/cache
 /images/build
+
+# fetched/built passt
+/net/src
+/net/build
+/net/dist
