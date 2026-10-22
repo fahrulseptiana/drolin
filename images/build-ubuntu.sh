@@ -78,7 +78,7 @@ apt_install systemd >/dev/null 2>&1 || true
 as_root sed -i 's|^systemd-machine-id-setup.*|true|' \
     "$ROOT/var/lib/dpkg/info/systemd.postinst"
 as_root chroot "$ROOT" env DEBIAN_FRONTEND=noninteractive dpkg --configure -a
-apt_install systemd-sysv dbus udev
+apt_install systemd-sysv dbus udev iproute2 iputils-ping curl
 as_root chroot "$ROOT" apt-get clean
 as_root rm -rf "$ROOT/var/cache/apt"/* "$ROOT/var/lib/apt/lists"/*
 
@@ -98,6 +98,25 @@ as_root ln -sf /usr/lib/systemd/system/getty@.service \
     "$ROOT/etc/systemd/system/getty.target.wants/getty@tty0.service"
 as_root ln -sf /usr/lib/systemd/system/multi-user.target \
     "$ROOT/etc/systemd/system/default.target"
+
+# DHCP on the UML vector interface. passt is the DHCP server on the other end.
+as_root mkdir -p "$ROOT/etc/systemd/network"
+as_root tee "$ROOT/etc/systemd/network/20-vec0.network" >/dev/null <<'NETWORK'
+[Match]
+Name=vec0
+
+[Network]
+DHCP=ipv4
+NETWORK
+as_root mkdir -p "$ROOT/etc/systemd/system/multi-user.target.wants"
+as_root mkdir -p "$ROOT/etc/systemd/system/sockets.target.wants"
+as_root ln -sf /usr/lib/systemd/system/systemd-networkd.service \
+    "$ROOT/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+as_root ln -sf /usr/lib/systemd/system/systemd-networkd.socket \
+    "$ROOT/etc/systemd/system/sockets.target.wants/systemd-networkd.socket"
+as_root tee "$ROOT/etc/resolv.conf" >/dev/null <<'RESOLV'
+nameserver 1.1.1.1
+RESOLV
 
 # A shell that powers off when it exits. The base image has systemd's
 # systemctl, but the wrapper also makes `exit` finish the UML process.

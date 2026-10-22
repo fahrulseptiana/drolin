@@ -17,6 +17,10 @@ devtmpfs at boot.
 `rust-lld` and writes a newc archive directly in Python. It works on macOS and
 in a minimal Linux container.
 
+systemd-networkd DHCPs the UML vector interface `vec0`; passt is the DHCP
+server. The image also carries `iproute2`, `iputils-ping` and `curl` for
+inspection.
+
 `build-ubuntu.sh` needs an arm64 Linux host or container and root/sudo because
 systemd is installed through a chroot. Cross-architecture APK builds consume
 the ext4 artifact produced by an arm64 job.
