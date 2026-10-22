@@ -145,18 +145,22 @@ as_root sed -i 's|^root:x:0:0:root:/root:/bin/bash$|root:x:0:0:root:/root:/usr/l
 
 as_root tee "$ROOT/usr/local/bin/drolin-marker" >/dev/null <<'MARKER'
 #!/bin/sh
+# The app does not need this marker. Only automated boots, which ask for a
+# poweroff, print it; interactive boots keep the console prompt clean.
+grep -q 'drolin.poweroff=1' /proc/cmdline 2>/dev/null || exit 0
 printf 'DROLIN_GUEST_OK\n' > /dev/console
 . /etc/os-release
 printf 'Ubuntu %s (%s)\n' "$VERSION_ID" "$(uname -m)" > /dev/console
-if grep -q 'drolin.poweroff=1' /proc/cmdline 2>/dev/null; then
-    systemctl poweroff || /usr/sbin/drolin-poweroff
-fi
+systemctl poweroff || /usr/sbin/drolin-poweroff
 MARKER
 as_root chmod 755 "$ROOT/usr/local/bin/drolin-marker"
 as_root tee "$ROOT/etc/systemd/system/drolin-marker.service" >/dev/null <<'UNIT'
 [Unit]
 Description=Drolin guest marker
-After=multi-user.target
+# Print before the console getty, otherwise the marker lands after the shell
+# prompt. Ordering against both the instance and the target covers the getty
+# job no matter which path pulls it in.
+Before=getty@tty0.service getty.target
 
 [Service]
 Type=oneshot

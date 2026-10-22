@@ -159,8 +159,9 @@ image is compressed into the APK and expanded once into app data.
 systemd is PID 1 (`/sbin/init`). It starts dbus, udev, logind, journald and the
 console getty. `/usr/local/bin/drolin-shell` runs bash and powers off when bash
 exits, so `exit` ends the UML process. `/usr/local/bin/drolin-marker` prints
-`DROLIN_GUEST_OK` and, with the `drolin.poweroff=1` kernel argument, powers off
-for automated checks. `/usr/sbin/drolin-poweroff` is exposed as `poweroff` and
+`DROLIN_GUEST_OK` only with the `drolin.poweroff=1` kernel argument, then powers
+off for automated checks. Interactive boots print no marker, keeping the shell
+prompt clean. `/usr/sbin/drolin-poweroff` is exposed as `poweroff` and
 `halt`.
 
 The base tarball's systemd postinst calls `systemd-machine-id-setup`, which
