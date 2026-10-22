@@ -68,6 +68,7 @@ object GuestSession {
                 return
             }
             val stub = File(libDir, "libstub.so")
+        val passt = File(libDir, "libpasst.so")
 
             val rootfs = File(activity.filesDir, "rootfs.ext4")
             if (!rootfs.isFile) installBundledRootfs(activity, rootfs)
@@ -84,6 +85,7 @@ object GuestSession {
                 args += listOf("--initramfs", initramfs.absolutePath)
             }
             if (stub.canExecute()) args += listOf("--stub-exe", stub.absolutePath)
+        if (passt.canExecute()) args += listOf("--net", "--passt", passt.absolutePath)
 
             val env = arrayOf(
                 "DROLIN_HOME=${activity.filesDir.absolutePath}",

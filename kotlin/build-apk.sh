@@ -88,7 +88,7 @@ else
     echo "WARNING: no Ubuntu image at $ROOTFS; the app will boot the demo initramfs" >&2
 fi
 
-KERNEL=${KERNEL:-$ROOT/kernel/dist/linux-um-$KERNEL_ARCH}
+KERNEL=${KERNEL:-$ROOT/kernel/dist/linux-um-$KERNEL_ARCH-android}
 if [ -f "$KERNEL" ]; then
     cp -f "$KERNEL" "$JNI/liblinux.so"
     chmod 755 "$JNI/liblinux.so"
@@ -98,7 +98,16 @@ else
     echo "WARNING: the APK will install, but the app will report a missing kernel" >&2
 fi
 
-STUB=${STUB:-$ROOT/kernel/dist/stub_exe-$KERNEL_ARCH}
+PASST=${PASST:-$ROOT/net/dist/passt-android}
+if [ -f "$PASST" ]; then
+    cp -f "$PASST" "$JNI/libpasst.so"
+    chmod 755 "$JNI/libpasst.so"
+else
+    rm -f "$JNI/libpasst.so"
+    echo "WARNING: no Android passt at $PASST; the guest will boot without networking" >&2
+fi
+
+STUB=${STUB:-$ROOT/kernel/dist/stub_exe-$KERNEL_ARCH-android}
 if [ -f "$STUB" ]; then
     cp -f "$STUB" "$JNI/libstub.so"
     chmod 755 "$JNI/libstub.so"

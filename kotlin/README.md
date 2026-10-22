@@ -15,8 +15,13 @@ cross-compiles the engine with the NDK, packages:
 * `lib/arm64-v8a/libdrolin.so` — the Rust CLI;
 * `lib/arm64-v8a/liblinux.so` — the bionic UML kernel;
 * `lib/arm64-v8a/libstub.so` — the standalone UML stub;
+* `lib/arm64-v8a/libpasst.so` — static bionic passt;
 * `assets/initramfs.cpio.gz` — demo guest;
 * `assets/rootfs.ext4.gz` — Ubuntu 26.04.1 arm64.
+
+`build-apk.sh` takes `PASST=...` (default `net/dist/passt-android`); the app
+passes `--net --passt` to the engine. The manifest requests `INTERNET`, without
+which Android refuses socket creation in the app's uid.
 
 The names end in `.so` because `nativeLibraryDir` is the only location Android
 lets an unprivileged app execute from. The files are ordinary executables.
