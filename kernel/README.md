@@ -28,6 +28,11 @@ The minimal config enables `CONFIG_UML_NET_VECTOR=y`. It is compatible with
 `select MAY_HAVE_RUNTIME_DEPS`; the vector `fd` transport does not resolve
 hostnames.
 
+The same fragment enables Docker's kernel requirements: PID and user
+namespaces, memory/pids cgroups, overlayfs, veth/bridge, and nftables plus
+legacy iptables NAT. Without those, `docker.service` is installed but cannot
+start.
+
 ## Android
 
 `build-android.sh` produces the same guest for an app. It links statically
