@@ -1,4 +1,4 @@
-.PHONY: all build check test guest ubuntu kernel android-kernel apk run-demo run-ubuntu clean
+.PHONY: all build check test guest ubuntu kernel android-kernel passt passt-android apk run-demo run-ubuntu clean
 
 all: check
 
@@ -24,6 +24,12 @@ kernel:
 android-kernel:
 	./kernel/build-android.sh
 
+passt:
+	./net/build-passt.sh
+
+passt-android:
+	MODE=android ./net/build-passt.sh
+
 apk:
 	./kotlin/build-apk.sh
 
@@ -39,6 +45,7 @@ run-ubuntu: build
 		--kernel kernel/dist/linux-um-$$(uname -m) \
 		--rootfs images/dist/ubuntu-26.04.1-arm64.ext4 \
 		--init /sbin/init \
+		--net --passt net/dist/passt-host \
 		--marker DROLIN_GUEST_OK
 
 clean:

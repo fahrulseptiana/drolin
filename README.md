@@ -41,6 +41,24 @@ systemd is PID 1. You get a root bash shell through an autologin on the UML
 console. `uname -a` reports the pinned kernel version (`7.2.12-drolin`), and
 `systemctl status` is available.
 
+## Networking
+
+The guest gets DHCP, DNS, ICMP and TCP without root, a tap device or user
+namespaces. UML's vector `fd` transport is bridged by the Rust runtime to
+passt, a userspace TCP/IP stack that reaches the network through ordinary
+sockets.
+
+```sh
+make passt                         # host static passt
+cargo run -p drolin-cli -- run \
+  --kernel kernel/dist/linux-um-aarch64 \
+  --rootfs images/dist/ubuntu-26.04.1-arm64.ext4 \
+  --init /sbin/init --net --passt net/dist/passt-host
+```
+
+The guest interface is `vec0`; systemd-networkd obtains `10.0.2.15/24` from
+passt and uses `1.1.1.1` for DNS. See `net/README.md`.
+
 ## Android
 
 ```sh

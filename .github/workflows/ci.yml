@@ -44,10 +44,12 @@ jobs:
       - name: build and boot Ubuntu
         run: |
           ./images/build-ubuntu.sh
+          MODE=host ./net/build-passt.sh
           TMPDIR=$RUNNER_TEMP ./target/release/drolin run \
             --kernel kernel/dist/linux-um-aarch64 \
             --rootfs images/dist/ubuntu-26.04.1-arm64.ext4 \
             --init /sbin/init --arg drolin.poweroff=1 \
+            --net --passt net/dist/passt-host \
             --marker DROLIN_GUEST_OK --timeout 180
       - uses: actions/upload-artifact@v4
         with:
@@ -71,10 +73,11 @@ jobs:
             xz-utils e2fsprogs python3 gzip
       - name: install NDK
         run: sdkmanager --install "ndk;30.0.16248370" "platforms;android-35" "build-tools;35.0.0"
-      - name: build bionic kernel
+      - name: build bionic kernel and passt
         run: |
           NDK="$ANDROID_HOME/ndk/30.0.16248370" ./kernel/build-android.sh
-          ls -lh kernel/dist/linux-um-aarch64 kernel/dist/stub_exe-aarch64
+          NDK="$ANDROID_HOME/ndk/30.0.16248370" MODE=android ./net/build-passt.sh
+          ls -lh kernel/dist/linux-um-aarch64-android kernel/dist/stub_exe-aarch64-android net/dist/passt-android
       - uses: actions/download-artifact@v4
         with:
           name: ubuntu-rootfs
@@ -82,8 +85,9 @@ jobs:
       - name: build APK
         run: |
           ANDROID_HOME="$ANDROID_HOME" \
-          KERNEL=kernel/dist/linux-um-aarch64 \
-          STUB=kernel/dist/stub_exe-aarch64 \
+          KERNEL=kernel/dist/linux-um-aarch64-android \
+          STUB=kernel/dist/stub_exe-aarch64-android \
+          PASST=net/dist/passt-android \
           ROOTFS=images/dist/ubuntu-26.04.1-arm64.ext4 \
           ./kotlin/build-apk.sh
       - uses: actions/upload-artifact@v4

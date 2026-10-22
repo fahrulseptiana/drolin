@@ -86,6 +86,38 @@ compiles statically against the NDK sysroot and bionic for an app.
 Bionic is required for the app. A glibc kernel is a valid `adb shell` binary but
 dies under zygote's seccomp filter, and Android has no glibc loader.
 
+## Networking
+
+Every privileged UML transport is unavailable to an unprivileged app: `tap`
+needs `/dev/net/tun` and `CAP_NET_ADMIN`, `raw` needs `CAP_NET_RAW`, and the
+others need a switch daemon. The vector driver's `fd` transport needs only a
+descriptor somebody else created.
+
+The runtime creates two socketpairs:
+
+```
+UML  <--SOCK_DGRAM, one frame per datagram-->  bridge
+bridge  <--SOCK_STREAM, 4-byte length prefix-->  passt
+passt  <--ordinary TCP/UDP/ICMP sockets-->  host network
+```
+
+The bridge is Rust (`drolin-runtime/src/net.rs`), so the old C `umnet` helper is
+not needed. passt starts with `-F <fd> -t none -u none` and an explicit network:
+
+```text
+-4 -a 10.0.2.15 -n 24 -g 10.0.2.2 -D 1.1.1.1
+```
+
+Explicit configuration is load-bearing on Android: netlink is denied, the
+routing table is per-uid, and there is no `/etc/resolv.conf`. passt only needs
+outbound sockets, which an app may open with the `INTERNET` permission.
+
+The guest image enables systemd-networkd with DHCP on `vec0`. It receives
+`10.0.2.15/24`, a route through `10.0.2.2`, and DNS `1.1.1.1`.
+
+`net/build-passt.sh` builds a static host binary and, with `MODE=android`, a
+bionic binary for the APK. The Android build applies the pinned bionic patch.
+
 ## Guest page size
 
 A guest page is a host `mmap()`, so:
