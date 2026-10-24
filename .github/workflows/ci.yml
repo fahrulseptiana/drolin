@@ -1,9 +1,18 @@
 name: ci
 
+# Releases are cut from tags only: pushing a branch or opening a pull request
+# does not start a run, so the expensive kernel and APK builds happen once per
+# version.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+
 on:
   push:
-  pull_request:
-  workflow_dispatch:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
 
 jobs:
   rust:
@@ -51,10 +60,14 @@ jobs:
             --init /sbin/init --arg drolin.poweroff=1 \
             --net --passt net/dist/passt-host \
             --marker DROLIN_GUEST_OK --timeout 180
+      # images/build-ubuntu.sh writes the ext4 and its gzip; only the gzip is
+      # published, and the APK build consumes it as is.
       - uses: actions/upload-artifact@v7
         with:
           name: ubuntu-rootfs
-          path: images/dist/ubuntu-26.04.1-arm64.ext4
+          path: images/dist/ubuntu-26.04.1-arm64.ext4.gz
+          if-no-files-found: error
+          retention-days: 7
 
   android:
     needs: guest
@@ -88,9 +101,53 @@ jobs:
           KERNEL=kernel/dist/linux-um-aarch64-android \
           STUB=kernel/dist/stub_exe-aarch64-android \
           PASST=net/dist/passt-android \
-          ROOTFS=images/dist/ubuntu-26.04.1-arm64.ext4 \
+          ROOTFS=images/dist/ubuntu-26.04.1-arm64.ext4.gz \
           ./android/build-apk.sh
       - uses: actions/upload-artifact@v7
         with:
           name: drolin-apk
           path: android/dist/drolin.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    # A failing test or a guest that does not boot must not publish a release.
+    needs: [rust, guest, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: name the assets and checksum them
+        run: |
+          set -eu
+          mkdir -p out
+          mv dist/drolin.apk "out/drolin-${GITHUB_REF_NAME}-arm64-v8a-debug.apk"
+          mv dist/ubuntu-26.04.1-arm64.ext4.gz out/
+          cd out
+          sha256sum ./*.apk ./*.ext4.gz | sed 's|\./||' > SHA256SUMS
+          cat SHA256SUMS
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          case "$TAG" in
+            *-alpha*|*-beta*|*-rc*) PRE=--prerelease ;;
+            *) PRE= ;;
+          esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Re-running a tag push replaces the assets instead of failing.
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* \
+              --title "$TAG" \
+              --notes "The APK is a debug build signed with a throwaway key generated during the run, so Android cannot upgrade an install from another tag: uninstall the previous app first. The attached image is the exact Ubuntu arm64 rootfs the APK boots." \
+              --generate-notes \
+              --verify-tag $PRE
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name'

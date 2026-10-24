@@ -82,7 +82,13 @@ cp -f "$INITRAMFS" "$APP/assets/initramfs.cpio.gz"
 ROOTFS=${ROOTFS:-$ROOT/images/dist/ubuntu-26.04.1-arm64.ext4}
 rm -f "$APP/assets/rootfs.ext4.gz"
 if [ -f "$ROOTFS" ]; then
-    gzip -n -9 -c "$ROOTFS" > "$APP/assets/rootfs.ext4.gz"
+    case "$ROOTFS" in
+        # CI publishes the gzip built by images/build-ubuntu.sh, which is already
+        # reproducible (-n -9), so copy it instead of decompressing the ext4 and
+        # compressing it again.
+        *.gz) cp -f "$ROOTFS" "$APP/assets/rootfs.ext4.gz" ;;
+        *) gzip -n -9 -c "$ROOTFS" > "$APP/assets/rootfs.ext4.gz" ;;
+    esac
     echo "bundled $(du -h "$APP/assets/rootfs.ext4.gz" | cut -f1) Ubuntu image"
 else
     echo "WARNING: no Ubuntu image at $ROOTFS; the app will boot the demo initramfs" >&2
