@@ -1,0 +1,662 @@
+diff -ruN linux-rc4-git/arch/um/kernel/trap.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/trap.c
+--- a/arch/um/kernel/trap.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/trap.c	2026-10-21 20:22:39
+@@ -7,7 +7,9 @@
+ #include <linux/sched/signal.h>
+ #include <linux/hardirq.h>
+ #include <linux/module.h>
++#include <linux/sizes.h>
+ #include <linux/uaccess.h>
++#include <linux/userfaultfd_k.h>
+ #include <linux/sched/debug.h>
+ #include <asm/current.h>
+ #include <asm/tlbflush.h>
+@@ -134,6 +136,265 @@
+ }
+ 
+ /*
++ * Anonymous fault-around.
++ *
++ * Every guest page fault costs a full stub handoff: SIGSEGV in the child,
++ * futex/ptrace transfer to the UML kernel thread, and a second transfer back
++ * to resume -- 18.9us (seccomp) / 41.0us (ptrace) per fault on the reference
++ * device, dominated entirely by the two voluntary context switches, not by
++ * handle_mm_fault. The stub mmap transport, however, is already a
++ * batch: um_tlb_sync walks the marked PTE range and queues one stub_syscall
++ * per page, and the whole queue is executed in the *same* handoff that
++ * resumes the guest (see userspace() in os-Linux/skas/process.c). So if we
++ * install K extra PTEs while we are here anyway, K pages ride one handoff
++ * instead of costing K.
++ *
++ * This helps only paths where each page really would fault separately, i.e.
++ * the guest touching fresh anonymous memory. It does NOT help copy_to_user
++ * and friends: uaccess runs in the kernel address space and takes no per-page
++ * stub handoff in the first place.
++ *
++ * The speculation is restricted to vma_is_anonymous() && pte_none() &&
++ * !userfaultfd_armed():
++ *  - file-backed faults can do I/O and have their own fault-around upstream;
++ *  - a non-none PTE may be a swap entry, and do_swap_page can block or
++ *    return VM_FAULT_RETRY -- pte_none keeps us on the do_anonymous_page
++ *    path only;
++ *  - userfaultfd must see real faults, not speculative ones.
++ *
++ * The window ramps up in pages driven by a sequential-stream detector, so a
++ * random-access workload never pays for pages it will not touch; only a stream
++ * that keeps faulting exactly past the previous window earns a bigger one.
++ *
++ * The "prefault=" command-line override is in BYTES (0 disables) because
++ * PAGE_SIZE is parametric here and a page count would mean four times the
++ * memory on a 16K guest than on a 4K one. The *default* has to scale the other
++ * way, though, and getting that backwards cost most of the benefit: a fixed
++ * 128K default is 32 pages at 4K but only 8 at 16K, which silently truncates
++ * the ramp at its second-to-last step. Measured on a Snapdragon 870, 16K
++ * guest, 32MB working set, median of 7:
++ *
++ *	prefault=0	1492 MB/s	windows disabled
++ *	128K (8 pages)	2495 MB/s	what the fixed default gave
++ *	512K (32 pages)	4601 MB/s	the full ramp
++ *
++ * with the host managing 3222 MB/s on the same test -- so the truncated
++ * default was the difference between trailing the host by a quarter and
++ * beating it by 43%. Tie the default to the ramp instead, and the top of the
++ * ramp is reachable at any page size. On a 4K guest this is 128K, exactly the
++ * old default, so only the larger page sizes change behaviour.
++ *
++ * 32 is where the curve flattens, which is why the ramp stops there: extending
++ * it and re-measuring the same way gave 4908 MB/s at 64 pages and 4824 at 128,
++ * i.e. nothing beyond the noise for four times the memory speculated per
++ * fault.
++ */
++#define UM_PREFAULT_MAX_PAGES 32
++static const unsigned int um_prefault_ramp[] = {
++	0, 4, 16, UM_PREFAULT_MAX_PAGES
++};
++#define UM_PREFAULT_LEVEL_MAX (ARRAY_SIZE(um_prefault_ramp) - 1)
++
++static unsigned long um_prefault_bytes __read_mostly =
++	UM_PREFAULT_MAX_PAGES * PAGE_SIZE;
++
++static int __init um_prefault_setup(char *str)
++{
++	um_prefault_bytes = memparse(str, &str);
++	return 1;
++}
++__setup("prefault=", um_prefault_setup);
++
++/*
++ * Count the leading run of pte_none() pages in [addr, seg_end), where the
++ * caller guarantees the range does not cross a PMD (or folded-level)
++ * boundary, so a single PTE table covers it. Sets *stop if the scan hit
++ * something that ends the speculation window (a populated PTE, a swap entry,
++ * or a PTE table we cannot map).
++ */
++static unsigned int um_prefault_scan(struct mm_struct *mm, unsigned long addr,
++				     unsigned long seg_end, bool *stop)
++{
++	unsigned int max = (seg_end - addr) >> PAGE_SHIFT;
++	unsigned int nr = 0;
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++
++	/*
++	 * A missing table at any level means every PTE below it is none, and
++	 * that is the common case for a fresh allocation: the whole segment
++	 * is prefaultable and handle_mm_fault will build the tables.
++	 */
++	pgd = pgd_offset(mm, addr);
++	if (pgd_none(*pgd))
++		return max;
++	if (unlikely(pgd_bad(*pgd)))
++		goto stop;
++
++	p4d = p4d_offset(pgd, addr);
++	if (p4d_none(*p4d))
++		return max;
++	if (unlikely(p4d_bad(*p4d)))
++		goto stop;
++
++	pud = pud_offset(p4d, addr);
++	if (pud_none(*pud))
++		return max;
++	if (unlikely(pud_bad(*pud)))
++		goto stop;
++
++	pmd = pmd_offset(pud, addr);
++	if (pmd_none(*pmd))
++		return max;
++	if (unlikely(pmd_bad(*pmd)))
++		goto stop;
++
++	/*
++	 * pte_offset_map() may return NULL (racing table teardown). We are
++	 * purely speculative, so any ambiguity just ends the window.
++	 */
++	pte = pte_offset_map(pmd, addr);
++	if (!pte)
++		goto stop;
++
++	while (nr < max && pte_none(pte[nr]))
++		nr++;
++	pte_unmap(pte);
++
++	if (nr < max)
++		*stop = true;
++	return nr;
++
++stop:
++	*stop = true;
++	return 0;
++}
++
++/*
++ * Called with mmap_read_lock held, right after the primary fault succeeded
++ * and before the single handoff that will publish it to the stub.
++ *
++ * Returns false only if handle_mm_fault dropped the mmap lock (the caller
++ * must then skip its unlock). With the flags we pass that is a can't-happen,
++ * but see the comment at the VM_FAULT_RETRY check -- silently guessing wrong
++ * about lock ownership here is either a double-unlock or a leaked lock.
++ */
++static bool um_prefault_around(struct mm_struct *mm, struct vm_area_struct *vma,
++			       unsigned long address, unsigned int flags)
++{
++	unsigned long addr, end;
++	unsigned int level = 0, nr;
++	int slots;
++
++	if (!um_prefault_bytes)
++		return true;
++
++	if (!vma_is_anonymous(vma) || userfaultfd_armed(vma))
++		return true;
++
++	address &= PAGE_MASK;
++
++	/*
++	 * Sequential-stream detector: a stream that consumed its previous
++	 * window faults exactly at prefault_next. Anything else resets the
++	 * ramp, so the first fault of any stream (and every fault of a random
++	 * workload) prefaults nothing.
++	 */
++	if (address == READ_ONCE(mm->context.prefault_next)) {
++		level = READ_ONCE(mm->context.prefault_level);
++		level = min_t(unsigned int, level + 1, UM_PREFAULT_LEVEL_MAX);
++	}
++	WRITE_ONCE(mm->context.prefault_level, level);
++
++	nr = um_prefault_ramp[level];
++	nr = min_t(unsigned long, nr, um_prefault_bytes >> PAGE_SHIFT);
++
++	/*
++	 * Anonymous pages land at arbitrary physmem offsets, so map() almost
++	 * never merges them: budget one syscall_data slot per page, plus one
++	 * for the primary fault, and never overflow the batch -- an overflow
++	 * flushes mid-batch, which is exactly the extra handoff this code
++	 * exists to avoid.
++	 */
++	slots = syscall_stub_free_slots(&mm->context.id) - 1;
++	if (slots < 0)
++		slots = 0;
++	nr = min_t(unsigned int, nr, slots);
++
++	addr = address + PAGE_SIZE;
++	end = addr + (unsigned long)nr * PAGE_SIZE;
++	if (end > vma->vm_end)
++		end = vma->vm_end;
++	if (end < addr)
++		end = addr;
++
++	/* Next fault of a sequential stream lands one page past the window. */
++	WRITE_ONCE(mm->context.prefault_next, end);
++
++	/*
++	 * FAULT_FLAG_ALLOW_RETRY must go: VM_FAULT_RETRY releases the mmap
++	 * lock, and our caller still owns a read lock it will unlock exactly
++	 * once. KILLABLE/INTERRUPTIBLE must go with it -- they are only valid
++	 * with retry, and a speculative fault has no business aborting on a
++	 * signal that the (already-satisfied) primary fault will handle.
++	 */
++	flags &= ~(FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE |
++		   FAULT_FLAG_INTERRUPTIBLE | FAULT_FLAG_TRIED);
++
++	while (addr < end) {
++		unsigned long seg_end;
++		unsigned int i, pages;
++		bool stop = false;
++
++		/*
++		 * Clamp the scan to one PTE table. Cascading through every
++		 * level's addr_end keeps this correct whichever levels are
++		 * folded (2-level and 4-level layouts both build here).
++		 */
++		seg_end = pgd_addr_end(addr, end);
++		seg_end = p4d_addr_end(addr, seg_end);
++		seg_end = pud_addr_end(addr, seg_end);
++		seg_end = pmd_addr_end(addr, seg_end);
++
++		pages = um_prefault_scan(mm, addr, seg_end, &stop);
++
++		for (i = 0; i < pages; i++, addr += PAGE_SIZE) {
++			vm_fault_t fault;
++
++			fault = handle_mm_fault(vma, addr, flags, NULL);
++
++			/*
++			 * Cannot happen for a pte_none anonymous fault with
++			 * ALLOW_RETRY stripped; if the mm core ever breaks
++			 * that contract, both codes mean it dropped the mmap
++			 * lock, so tell the caller instead of double-
++			 * unlocking.
++			 */
++			if (WARN_ON_ONCE(fault &
++					 (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
++				return false;
++
++			/*
++			 * Speculative failure (e.g. OOM) must not surface:
++			 * the primary fault already succeeded, the guest will
++			 * come back for this page if it really wants it.
++			 */
++			if (fault & VM_FAULT_ERROR)
++				return true;
++		}
++
++		if (stop)
++			break;
++		addr = seg_end;
++	}
++
++	return true;
++}
++
++/*
+  * Note this is constrained to return 0, -EFAULT, -EACCES, -ENOMEM by
+  * segv().
+  */
+@@ -207,7 +468,18 @@
+ 		pte = pte_offset_kernel(pmd, address);
+ 	} while (!pte_present(*pte));
+ 	err = 0;
++
+ 	/*
++	 * The fault is resolved but not yet published to the stub -- that
++	 * happens in one batched handoff on the way back to userspace. Piggy-
++	 * back a fault-around window onto that same handoff. Guest faults
++	 * only: a kernel-mode fault (uaccess) pays no per-page handoff, so
++	 * there is nothing to save.
++	 */
++	if (is_user && !um_prefault_around(mm, vma, address, flags))
++		goto out_nosemaphore;
++
++	/*
+ 	 * The below warning was added in place of
+ 	 *	pte_mkyoung(); if (is_write) pte_mkdirty();
+ 	 * If it's triggered, we'd see normally a hang here (a clean pte is
+@@ -251,7 +523,7 @@
+ 		task_pid_nr(tsk) > 1 ? KERN_INFO : KERN_EMERG,
+ 		tsk->comm, task_pid_nr(tsk), FAULT_ADDRESS(*fi),
+ 		(void *)UPT_IP(regs), (void *)UPT_SP(regs),
+-		fi->error_code);
++		FAULT_ERROR_CODE(*fi));
+ 
+ 	print_vma_addr(KERN_CONT " in ", UPT_IP(regs));
+ 	printk(KERN_CONT "\n");
+@@ -332,11 +604,13 @@
+ 	else if (current->pagefault_disabled) {
+ 		if (!mc) {
+ 			show_regs(container_of(regs, struct pt_regs, regs));
+-			panic("Segfault with pagefaults disabled but no mcontext");
++			panic("Segfault with pagefaults disabled but no mcontext: addr 0x%lx, ip 0x%lx, %s",
++			      address, ip, is_write ? "write" : "read");
+ 		}
+ 		if (!current->thread.segv_continue) {
+ 			show_regs(container_of(regs, struct pt_regs, regs));
+-			panic("Segfault without recovery target");
++			panic("Segfault without recovery target: addr 0x%lx, ip 0x%lx, %s",
++			      address, ip, is_write ? "write" : "read");
+ 		}
+ 		mc_set_rip(mc, current->thread.segv_continue);
+ 		current->thread.segv_continue = NULL;
+@@ -344,7 +618,8 @@
+ 	}
+ 	else if (current->mm == NULL) {
+ 		show_regs(container_of(regs, struct pt_regs, regs));
+-		panic("Segfault with no mm");
++		panic("Segfault with no mm: addr 0x%lx, ip 0x%lx, %s",
++			      address, ip, is_write ? "write" : "read");
+ 	}
+ 	else if (!is_user && address > PAGE_SIZE && address < TASK_SIZE) {
+ 		show_regs(container_of(regs, struct pt_regs, regs));
+diff -ruN linux-rc4-git/arch/um/kernel/um_arch.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/um_arch.c
+--- a/arch/um/kernel/um_arch.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/um_arch.c	2026-10-21 20:22:39
+@@ -22,7 +22,6 @@
+ #include <linux/smp-internal.h>
+ 
+ #include <asm/processor.h>
+-#include <asm/cpufeature.h>
+ #include <asm/sections.h>
+ #include <asm/setup.h>
+ #include <asm/text-patching.h>
+@@ -59,7 +58,7 @@
+ struct cpuinfo_um boot_cpu_data = {
+ 	.loops_per_jiffy	= 0,
+ 	.cache_alignment	= L1_CACHE_BYTES,
+-	.x86_capability		= { 0 }
++	.arch			= { }
+ };
+ 
+ EXPORT_SYMBOL(boot_cpu_data);
+@@ -83,12 +82,14 @@
+ 	seq_printf(m, "model name\t: UML\n");
+ 	seq_printf(m, "mode\t\t: skas\n");
+ 	seq_printf(m, "host\t\t: %s\n", host_info);
+-	seq_printf(m, "fpu\t\t: %s\n", str_yes_no(cpu_has(&boot_cpu_data, X86_FEATURE_FPU)));
+-	seq_printf(m, "flags\t\t:");
+-	for (i = 0; i < 32*NCAPINTS; i++)
+-		if (cpu_has(&boot_cpu_data, i) && (x86_cap_flags[i] != NULL))
+-			seq_printf(m, " %s", x86_cap_flags[i]);
+-	seq_printf(m, "\n");
++	/*
++	 * Everything above is the same on every host; everything the host CPU
++	 * actually determines is the subarch's business. x86 prints an "fpu"
++	 * line and a CPUID-derived "flags" list, arm64 prints a hwcap-derived
++	 * "Features" list -- both matching what that architecture's real
++	 * /proc/cpuinfo looks like, which is what guest userspace parses.
++	 */
++	arch_show_cpuinfo(m);
+ 	seq_printf(m, "cache_alignment\t: %d\n", boot_cpu_data.cache_alignment);
+ 	seq_printf(m, "bogomips\t: %lu.%02lu\n",
+ 		   loops_per_jiffy/(500000/HZ),
+@@ -264,15 +265,6 @@
+ 
+ #define MIN_VMALLOC (32 * 1024 * 1024)
+ 
+-static void __init parse_host_cpu_flags(char *line)
+-{
+-	int i;
+-	for (i = 0; i < 32*NCAPINTS; i++) {
+-		if ((x86_cap_flags[i] != NULL) && strstr(line, x86_cap_flags[i]))
+-			set_cpu_cap(&boot_cpu_data, i);
+-	}
+-}
+-
+ static void __init parse_cache_line(char *line)
+ {
+ 	long res;
+@@ -289,15 +281,53 @@
+ 	}
+ }
+ 
++/*
++ * Called for every line of the *host's* /proc/cpuinfo. Returns non-zero once
++ * there is nothing left worth reading, so a host with many cores is not walked
++ * in full.
++ */
++static int __init parse_host_cpu_line(char *line)
++{
++	/*
++	 * "cache_alignment" is an x86-only field. Probing for it on every host is
++	 * harmless: where it is absent the L1_CACHE_BYTES default in
++	 * boot_cpu_data stands, which is what UML used before this was parsed at
++	 * all.
++	 */
++	if (strstr(line, "cache_alignment")) {
++		parse_cache_line(line);
++		return 0;
++	}
++
++	return arch_parse_host_cpu_flags(line);
++}
++
++/*
++ * Strip an address tag before using a pointer as an address limit.
++ *
++ * arm64 implements top-byte-ignore, and Android turns it on: pointers there
++ * routinely carry a non-zero tag in bits 56-63, which the hardware discards on
++ * access but which is very much present in the value. Deriving the top of the
++ * address space from a tagged stack pointer therefore produces something like
++ * 0xb400007e76fe7000, and everything computed from it -- stub placement, guest
++ * TASK_SIZE -- is nonsense. The untagged value here is 0x7e76fe7000, which is a
++ * plausible stack address on this host's 39-bit user address space.
++ *
++ * Masking is unconditional because an untagged pointer is unchanged by it.
++ */
++#define UM_ADDR_TAG_MASK	((1UL << 56) - 1)
++
+ static unsigned long __init get_top_address(char **envp)
+ {
+-	unsigned long top_addr = (unsigned long) &top_addr;
++	unsigned long top_addr = (unsigned long) &top_addr & UM_ADDR_TAG_MASK;
+ 	int i;
+ 
+ 	/* The earliest variable should be after the program name in ELF */
+ 	for (i = 0; envp[i]; i++) {
+-		if ((unsigned long) envp[i] > top_addr)
+-			top_addr = (unsigned long) envp[i];
++		unsigned long e = (unsigned long) envp[i] & UM_ADDR_TAG_MASK;
++
++		if (e > top_addr)
++			top_addr = e;
+ 	}
+ 
+ 	return PAGE_ALIGN(top_addr + 1);
+@@ -340,12 +370,57 @@
+ 	 * TASK_SIZE needs to be PGDIR_SIZE aligned or else exit_mmap craps
+ 	 * out
+ 	 */
+-	task_size = task_size & PGDIR_MASK;
++	if (task_size & PGDIR_MASK) {
++		task_size = task_size & PGDIR_MASK;
++	} else {
++		/*
++		 * The host's entire user address space is smaller than one
++		 * guest PGDIR, so rounding down to PGDIR_SIZE lands on zero --
++		 * and a zero TASK_SIZE fails every guest mmap, so the first
++		 * exec returns -ENOMEM and the boot dies with "Requested init
++		 * failed (error -12)" and no other clue.
++		 *
++		 * This is not a corner case. A 64-bit UML guest has
++		 * PGDIR_SIZE == 512 GiB, and arm64 hosts built with
++		 * CONFIG_ARM64_VA_BITS_39 -- the usual choice for a 4 KiB-page
++		 * kernel, and what Android devices overwhelmingly ship -- have
++		 * exactly 512 GiB of user address space. The subtraction for
++		 * the stub then puts the top just below the only aligned value
++		 * that would have fit.
++		 *
++		 * Align to the next level down instead. UML's page tables are
++		 * software structures walked by UML itself -- the host does the
++		 * real translation through mmap -- so the granularity is a
++		 * choice, not a hardware constraint, and one PGDIR entry
++		 * covering a partially used range is exactly what the topmost
++		 * entry looks like on any host anyway.
++		 */
++		task_size = task_size & PUD_MASK;
++	}
+ 
++	/*
++	 * Every guest mapping is bounded by task_size, and task_size is derived
++	 * from where the *host* put this process's stack. When that derivation
++	 * goes wrong the failure is silent and total: every guest mmap returns
++	 * -ENOMEM, so the first exec fails with -12 and nothing anywhere says
++	 * why. Print the three numbers -- one line, once, at boot -- because
++	 * reconstructing them afterwards requires a debugger on a host that may
++	 * be a phone.
++	 */
++	os_info("Address space: host top 0x%lx, stub at 0x%lx, guest TASK_SIZE 0x%lx\n",
++		stub_start + STUB_SIZE, stub_start, task_size);
++
++	/*
++	 * Before os_early_checks(), which is where a host that can only offer
++	 * ptrace userspace clamps the count back to one: it has to see the
++	 * number we actually intend to use, not the unset zero.
++	 */
++	um_ncpus_init();
++
+ 	/* OS sanity checks that need to happen before the kernel runs */
+ 	os_early_checks();
+ 
+-	get_host_cpu_features(parse_host_cpu_flags, parse_cache_line);
++	get_host_cpu_features(parse_host_cpu_line);
+ 
+ 	brk_start = (unsigned long) sbrk(0);
+ 
+diff -ruN linux-rc4-git/arch/um/kernel/uml.lds.S /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/uml.lds.S
+--- a/arch/um/kernel/uml.lds.S	2026-10-21 20:44:44
++++ b/arch/um/kernel/uml.lds.S	2026-10-21 20:22:39
+@@ -1,6 +1,7 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+ #include <asm/vmlinux.lds.h>
+ #include <asm/page.h>
++#include <asm/cache.h>
+ 
+ OUTPUT_FORMAT(ELF_FORMAT)
+ OUTPUT_ARCH(ELF_ARCH)
+@@ -13,6 +14,29 @@
+   };
+ }
+ 
++/*
++ * One loadable segment for the whole binary.
++ *
++ * Without this, lld gives every permission group its own PT_LOAD and takes the
++ * addresses from this script, so any group that starts mid-page yields two
++ * segments sharing a page. load_elf_binary() maps ET_EXEC segments with
++ * MAP_FIXED_NOREPLACE; the second mmap of a shared page returns -EEXIST, and
++ * since that happens after the point of no return the kernel can only SIGSEGV
++ * the process. It presents as a bare "Segmentation fault" with no output and a
++ * PC that is already unmapped.
++ *
++ * bfd ld merged these into a single RWE segment, which is why UML never had to
++ * think about it and why this only shows up when linking with lld -- as the
++ * Android NDK does. Asking for one segment explicitly reproduces the layout
++ * that has always worked, rather than page-aligning a dozen boundaries that
++ * come from macros and will drift.
++ */
++PHDRS {
++  all PT_LOAD FILEHDR PHDRS FLAGS(7);   /* RWX, and map the ELF headers too */
++  note PT_NOTE FLAGS(4);
++  tls PT_TLS FLAGS(4);
++}
++
+ SECTIONS
+ {
+   /* This must contain the right address - not quite the default ELF one.*/
+@@ -28,7 +52,7 @@
+   . = ALIGN(PAGE_SIZE);
+ 
+   _text = .;
+-  INIT_TEXT_SECTION(0)
++  INIT_TEXT_SECTION(0) :all
+ 
+   .text      :
+   {
+@@ -74,9 +98,69 @@
+   init.data : { INIT_DATA }
+   __init_end = .;
+ 
++  /*
++   * The C runtime's constructor arrays, placed exactly as dyn.lds.S places
++   * them. This script -- the static one -- omitted them entirely, leaving the
++   * linker to put them wherever its default rules chose, which lands them in a
++   * segment of their own whose file offset does not match its virtual address.
++   *
++   * glibc tolerated that. bionic does not: __libc_init walks preinit_array
++   * before anything else runs, so a statically linked UML against bionic
++   * segfaults before main() with no output at all. The section was there in
++   * the ELF -- correctly sized, at a plausible address -- which is what makes
++   * this one hard to see.
++   *
++   * The alignment comment below is inherited from dyn.lds.S and is the reason
++   * the label sits outside the section.
++   */
++  /*
++   * Page-align every point where the segment permissions change.
++   *
++   * lld gives each permission group its own PT_LOAD, and takes the addresses
++   * from this script -- so a group that starts mid-page produces two segments
++   * sharing one page. load_elf_binary() maps ET_EXEC segments with
++   * MAP_FIXED_NOREPLACE, the second mmap of that shared page returns -EEXIST,
++   * and because this happens after the point of no return the kernel can only
++   * SIGSEGV the process. The symptom is a bare "Segmentation fault" with no
++   * output at all and a PC that is no longer mapped, which says nothing about
++   * the cause.
++   *
++   * bfd ld merged these groups into one RWE segment and the question never
++   * arose, which is why this only appears when linking with lld against the
++   * Android NDK.
++   */
++  . = ALIGN(PAGE_SIZE);
++  .preinit_array  : { *(.preinit_array) }
++  .init_array     : {
++    *(.kasan_init)
++    *(.init_array.*)
++    *(.init_array)
++  }
++  .fini_array     : { *(.fini_array) }
++
++  /*
++   * The alignment-specific data sections are named here for the same reason
++   * RW_DATA() names them on every other architecture: left out, they are
++   * orphans, and where an orphan lands is the linker's choice rather than this
++   * script's.
++   *
++   * The two linkers do not choose alike. bfd ld put them after .data, which is
++   * writable and correct. lld puts them with the read-only data, which places
++   * them inside __start_rodata..__end_rodata -- so mark_rodata_ro() mprotects
++   * bit_wait_table and friends read-only, and the first process to wait on a
++   * buffer dies on the write with "Segfault with no mm" and a backtrace
++   * pointing at prepare_to_wait, which has nothing to do with the cause.
++   *
++   * DATA_DATA already claims .data..once, .data..do_once and
++   * .data..shared_aligned, so only these need adding.
++   */
+   .data    :
+   {
+     INIT_TASK_DATA(KERNEL_STACK_SIZE)
++    NOSAVE_DATA
++    PAGE_ALIGNED_DATA(PAGE_SIZE)
++    CACHELINE_ALIGNED_DATA(L1_CACHE_BYTES)
++    READ_MOSTLY_DATA(L1_CACHE_BYTES)
+     DATA_DATA
+     *(.gnu.linkonce.d*)
+     CONSTRUCTORS
+@@ -92,14 +176,16 @@
+   }
+ 
+   .got           : { *(.got.plt) *(.got) }
++  . = ALIGN(PAGE_SIZE);
+   .eh_frame       : { KEEP (*(.eh_frame)) }
+   .dynamic       : { *(.dynamic) }
+-  .tdata	  : { *(.tdata .tdata.* .gnu.linkonce.td.*) }
+-  .tbss		  : { *(.tbss .tbss.* .gnu.linkonce.tb.*) *(.tcommon) }
++  . = ALIGN(PAGE_SIZE);
++  .tdata	  : { *(.tdata .tdata.* .gnu.linkonce.td.*) } :all :tls
++  .tbss		  : { *(.tbss .tbss.* .gnu.linkonce.tb.*) *(.tcommon) } :all :tls
+   /* We want the small data sections together, so single-instruction offsets
+      can access them all, and initialized data all before uninitialized, so
+      we can shorten the on-disk segment size.  */
+-  .sdata     : { *(.sdata) }
++  .sdata     : { *(.sdata) } :all
+   _edata  =  .;
+   PROVIDE (edata = .);
+   . = ALIGN(PAGE_SIZE);
+diff -ruN linux-rc4-git/arch/um/kernel/vmlinux.lds.S /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/vmlinux.lds.S
+--- a/arch/um/kernel/vmlinux.lds.S	2026-10-21 20:44:44
++++ b/arch/um/kernel/vmlinux.lds.S	2026-10-21 20:22:39
+@@ -1,5 +1,10 @@
+ #define RUNTIME_DISCARD_EXIT
+-KERNEL_STACK_SIZE = 4096 * (1 << CONFIG_KERNEL_STACK_ORDER);
++/*
++ * The guest kernel stack is measured in guest pages, not in 4K units: on a
++ * 16K-page host CONFIG_KERNEL_STACK_ORDER=2 must mean four 16K pages, the same
++ * as THREAD_SIZE in <asm/thread_info.h>, or the two disagree.
++ */
++KERNEL_STACK_SIZE = (1 << CONFIG_PAGE_SHIFT) * (1 << CONFIG_KERNEL_STACK_ORDER);
+ 
+ #ifdef CONFIG_LD_SCRIPT_STATIC
+ #include "uml.lds.S"

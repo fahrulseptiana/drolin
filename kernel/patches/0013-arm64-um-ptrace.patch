@@ -1,0 +1,887 @@
+diff -ruN linux-rc4-git/arch/arm64/um/ptrace.c /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/ptrace.c
+--- a/arch/arm64/um/ptrace.c	1970-01-01 07:00:00
++++ b/arch/arm64/um/ptrace.c	2026-10-21 20:22:38
+@@ -0,0 +1,261 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ptrace support for ARCH=um SUBARCH=arm64.
++ *
++ * The "user area" a debugger sees through PTRACE_PEEKUSR/POKEUSR is simply
++ * struct user_pt_regs: x0..x30, sp, pc, pstate. That makes register lookup a
++ * plain division rather than the offset table x86 needs, because arm64 has no
++ * segment registers, no separate orig_ax slot and no debug-register block in
++ * the user area.
++ */
++#include <linux/mm.h>
++#include <linux/sched.h>
++#include <linux/errno.h>
++#include <linux/elf.h>
++#include <linux/regset.h>
++#include <linux/uaccess.h>
++#include <asm/ptrace.h>
++#include <registers.h>
++
++static inline int reg_index(int regno)
++{
++	return regno / sizeof(unsigned long);
++}
++
++int putreg(struct task_struct *child, int regno, unsigned long value)
++{
++	int idx;
++
++	if (regno < 0 || regno >= MAX_REG_OFFSET ||
++	    (regno % sizeof(unsigned long)))
++		return -EIO;
++
++	idx = reg_index(regno);
++
++	if (idx == HOST_PSTATE) {
++		unsigned long old = child->thread.regs.regs.gp[HOST_PSTATE];
++
++		child->thread.regs.regs.gp[HOST_PSTATE] =
++			(old & ~UM_PSTATE_WRITABLE) | (value & UM_PSTATE_WRITABLE);
++		return 0;
++	}
++
++	child->thread.regs.regs.gp[idx] = value;
++	return 0;
++}
++
++unsigned long getreg(struct task_struct *child, int regno)
++{
++	if (regno < 0 || regno >= MAX_REG_OFFSET ||
++	    (regno % sizeof(unsigned long)))
++		return 0;
++
++	return child->thread.regs.regs.gp[reg_index(regno)];
++}
++
++int poke_user(struct task_struct *child, long addr, long data)
++{
++	if ((addr & (sizeof(unsigned long) - 1)) || addr < 0)
++		return -EIO;
++
++	if (addr < MAX_REG_OFFSET)
++		return putreg(child, addr, data);
++
++	/*
++	 * arm64 exposes no debug registers through the user area -- hardware
++	 * breakpoints and watchpoints are separate regsets (NT_ARM_HW_BREAK,
++	 * NT_ARM_HW_WATCH), which UML does not implement.
++	 */
++	return -EIO;
++}
++
++int peek_user(struct task_struct *child, long addr, long data)
++{
++	unsigned long tmp = 0;
++
++	if ((addr & (sizeof(unsigned long) - 1)) || addr < 0)
++		return -EIO;
++
++	if (addr < MAX_REG_OFFSET)
++		tmp = getreg(child, addr);
++
++	return put_user(tmp, (unsigned long __user *) data);
++}
++
++static int genregs_get(struct task_struct *target,
++		       const struct user_regset *regset,
++		       struct membuf to)
++{
++	int reg;
++
++	for (reg = 0; to.left; reg++)
++		membuf_store(&to, getreg(target, reg * sizeof(unsigned long)));
++	return 0;
++}
++
++static int genregs_set(struct task_struct *target,
++		       const struct user_regset *regset,
++		       unsigned int pos, unsigned int count,
++		       const void *kbuf, const void __user *ubuf)
++{
++	int ret = 0;
++
++	if (kbuf) {
++		const unsigned long *k = kbuf;
++
++		while (count >= sizeof(*k) && !ret) {
++			ret = putreg(target, pos, *k++);
++			count -= sizeof(*k);
++			pos += sizeof(*k);
++		}
++	} else {
++		const unsigned long __user *u = ubuf;
++
++		while (count >= sizeof(*u) && !ret) {
++			unsigned long word;
++
++			ret = __get_user(word, u++);
++			if (ret)
++				break;
++			ret = putreg(target, pos, word);
++			count -= sizeof(*u);
++			pos += sizeof(*u);
++		}
++	}
++	return ret;
++}
++
++static int fpregs_active(struct task_struct *target,
++			 const struct user_regset *regset)
++{
++	return regset->n;
++}
++
++static int fpregs_get(struct task_struct *target,
++		      const struct user_regset *regset,
++		      struct membuf to)
++{
++	void *fpregs = task_pt_regs(target)->regs.fp;
++
++	membuf_write(&to, fpregs, regset->size * regset->n);
++	return 0;
++}
++
++static int fpregs_set(struct task_struct *target,
++		      const struct user_regset *regset,
++		      unsigned int pos, unsigned int count,
++		      const void *kbuf, const void __user *ubuf)
++{
++	void *fpregs = task_pt_regs(target)->regs.fp;
++
++	return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
++				  fpregs, 0, regset->size * regset->n);
++}
++
++/*
++ * NT_ARM_SYSTEM_CALL, without which a guest tracer cannot see or change the
++ * syscall number at all.
++ *
++ * On arm64 the number is not part of the general register set -- x8 holds it on
++ * entry but is not authoritative, and there is no orig_x8 -- so this regset is
++ * the only interface for it. That makes it not an optional extra: without it,
++ * PTRACE_GETREGSET(NT_ARM_SYSTEM_CALL) fails outright, and a tracer has no way
++ * to name the syscall it is stopped in, or to cancel one by writing -1, which
++ * is how every arm64 ptrace sandbox blocks a call.
++ *
++ * The storage is uml_pt_regs.syscall, which handle_syscall() fills before
++ * calling the tracehooks and re-reads afterwards -- so a write here really does
++ * redirect or cancel the syscall, as it does on real hardware.
++ */
++static int system_call_get(struct task_struct *target,
++			   const struct user_regset *regset,
++			   struct membuf to)
++{
++	int syscallno = PT_REGS_SYSCALL_NR(task_pt_regs(target));
++
++	return membuf_store(&to, syscallno);
++}
++
++static int system_call_set(struct task_struct *target,
++			   const struct user_regset *regset,
++			   unsigned int pos, unsigned int count,
++			   const void *kbuf, const void __user *ubuf)
++{
++	int syscallno = PT_REGS_SYSCALL_NR(task_pt_regs(target));
++	int ret;
++
++	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &syscallno, 0, -1);
++	if (ret)
++		return ret;
++
++	PT_REGS_SYSCALL_NR(task_pt_regs(target)) = syscallno;
++	return 0;
++}
++
++static struct user_regset uml_regsets[] __ro_after_init = {
++	[REGSET_GENERAL] = {
++		USER_REGSET_NOTE_TYPE(PRSTATUS),
++		.n		= sizeof(struct user_pt_regs) / sizeof(long),
++		.size		= sizeof(long),
++		.align		= sizeof(long),
++		.regset_get	= genregs_get,
++		.set		= genregs_set,
++	},
++	[REGSET_FP] = {
++		USER_REGSET_NOTE_TYPE(PRFPREG),
++		/*
++		 * .n is fixed up at boot from host_fp_size, because the host
++		 * decides whether we are saving plain FPSIMD or an SVE state
++		 * whose size depends on the vector length.
++		 */
++		.size		= sizeof(long),
++		.align		= sizeof(long),
++		.active		= fpregs_active,
++		.regset_get	= fpregs_get,
++		.set		= fpregs_set,
++	},
++	[REGSET_SYSTEM_CALL] = {
++		USER_REGSET_NOTE_TYPE(ARM_SYSTEM_CALL),
++		.n		= 1,
++		.size		= sizeof(int),
++		.align		= sizeof(int),
++		.regset_get	= system_call_get,
++		.set		= system_call_set,
++	},
++};
++
++static const struct user_regset_view user_uml_view = {
++	.name = "aarch64", .e_machine = EM_AARCH64,
++	.regsets = uml_regsets, .n = ARRAY_SIZE(uml_regsets)
++};
++
++const struct user_regset_view *
++task_user_regset_view(struct task_struct *tsk)
++{
++	return &user_uml_view;
++}
++
++/*
++ * arm64 defines no architecture-specific ptrace requests that UML can serve.
++ *
++ * In particular there is no PTRACE_GETFPREGS/PTRACE_SETFPREGS: those are x86
++ * and arm32 legacy requests, and arm64 deliberately never defined them --
++ * floating-point state is read and written through PTRACE_GETREGSET with
++ * NT_PRFPREG (or NT_ARM_SVE), which arch/um/kernel/ptrace.c already routes
++ * through the regset view above. There is likewise no PTRACE_ARCH_PRCTL,
++ * because arm64 has no arch_prctl.
++ */
++long subarch_ptrace(struct task_struct *child, long request,
++		    unsigned long addr, unsigned long data)
++{
++	return -EIO;
++}
++
++static int __init init_regset_fp_info(void)
++{
++	uml_regsets[REGSET_FP].n =
++		host_fp_size / uml_regsets[REGSET_FP].size;
++
++	return 0;
++}
++arch_initcall(init_regset_fp_info);
+diff -ruN linux-rc4-git/arch/arm64/um/setjmp_aarch64.S /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/setjmp_aarch64.S
+--- a/arch/arm64/um/setjmp_aarch64.S	1970-01-01 07:00:00
++++ b/arch/arm64/um/setjmp_aarch64.S	2026-10-21 20:22:38
+@@ -0,0 +1,96 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * setjmp/longjmp for ARCH=um SUBARCH=arm64.
++ *
++ * UML uses its own setjmp/longjmp for kernel-side context switching rather than
++ * libc's -- arch/um/Makefile renames the symbols to kernel_setjmp/kernel_longjmp
++ * to keep libc's out of the way. libc's versions are unsuitable because they may
++ * mangle the saved SP and PC with a per-process pointer guard, and glibc's
++ * siglongjmp variant touches the signal mask; UML needs a plain, predictable
++ * register save.
++ *
++ * The buffer layout matches struct __jmp_buf in
++ * arch/arm64/um/shared/sysdep/archsetjmp.h:
++ *
++ *	  0	x19		 88	x30 (return address)
++ *	  8	x20		 96	sp
++ *	 16	x21		104	(padding, keeps 16-byte alignment)
++ *	 24	x22		112	d8
++ *	 32	x23		120	d9
++ *	 40	x24		128	d10
++ *	 48	x25		136	d11
++ *	 56	x26		144	d12
++ *	 64	x27		152	d13
++ *	 72	x28		160	d14
++ *	 80	x29 (fp)	168	d15
++ *
++ * That is exactly the AAPCS64 callee-saved set: x19-x28, the frame pointer, the
++ * link register, SP, and the low 64 bits of v8-v15. Note the *low 64 bits* only
++ * -- AAPCS64 requires callees to preserve no more than that, so saving full
++ * 128-bit vectors would be wasted work, and the guest's vector state never
++ * passes through here in any case (it lives in the stub's mcontext).
++ */
++
++	.text
++	.align 4
++	.globl kernel_setjmp
++	.type kernel_setjmp, @function
++kernel_setjmp:
++	stp	x19, x20, [x0, #0]
++	stp	x21, x22, [x0, #16]
++	stp	x23, x24, [x0, #32]
++	stp	x25, x26, [x0, #48]
++	stp	x27, x28, [x0, #64]
++	stp	x29, x30, [x0, #80]
++
++	/*
++	 * SP cannot be an operand of stp, so route it through a scratch
++	 * register. x2 is caller-saved, so clobbering it is free.
++	 */
++	mov	x2, sp
++	str	x2, [x0, #96]
++
++	stp	d8,  d9,  [x0, #112]
++	stp	d10, d11, [x0, #128]
++	stp	d12, d13, [x0, #144]
++	stp	d14, d15, [x0, #160]
++
++	mov	w0, #0
++	ret
++
++	.size kernel_setjmp,.-kernel_setjmp
++
++	.text
++	.align 4
++	.globl kernel_longjmp
++	.type kernel_longjmp, @function
++kernel_longjmp:
++	ldp	x19, x20, [x0, #0]
++	ldp	x21, x22, [x0, #16]
++	ldp	x23, x24, [x0, #32]
++	ldp	x25, x26, [x0, #48]
++	ldp	x27, x28, [x0, #64]
++	ldp	x29, x30, [x0, #80]
++
++	ldr	x2, [x0, #96]
++	mov	sp, x2
++
++	ldp	d8,  d9,  [x0, #112]
++	ldp	d10, d11, [x0, #128]
++	ldp	d12, d13, [x0, #144]
++	ldp	d14, d15, [x0, #160]
++
++	/*
++	 * longjmp(buf, 0) must appear to setjmp as a return of 1, otherwise the
++	 * caller cannot distinguish it from the original setjmp.
++	 * csinc w0, w1, wzr, ne  =>  w0 = (w1 != 0) ? w1 : wzr + 1
++	 */
++	cmp	w1, #0
++	csinc	w0, w1, wzr, ne
++
++	ret
++
++	.size kernel_longjmp,.-kernel_longjmp
++
++/* UML's binary is an ordinary ELF executable; keep the stack non-executable. */
++	.section .note.GNU-stack,"",@progbits
+diff -ruN linux-rc4-git/arch/arm64/um/os-Linux/Makefile /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/os-Linux/Makefile
+--- a/arch/arm64/um/os-Linux/Makefile	1970-01-01 07:00:00
++++ b/arch/arm64/um/os-Linux/Makefile	2026-10-21 20:22:38
+@@ -0,0 +1,7 @@
++# SPDX-License-Identifier: GPL-2.0
++
++obj-y = registers.o mcontext.o
++
++USER_OBJS := $(obj-y)
++
++include $(srctree)/arch/um/scripts/Makefile.rules
+diff -ruN linux-rc4-git/arch/arm64/um/os-Linux/mcontext.c /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/os-Linux/mcontext.c
+--- a/arch/arm64/um/os-Linux/mcontext.c	1970-01-01 07:00:00
++++ b/arch/arm64/um/os-Linux/mcontext.c	2026-10-21 20:22:38
+@@ -0,0 +1,213 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * mcontext <-> uml_pt_regs conversion for ARCH=um SUBARCH=arm64.
++ *
++ * This is host-side code: it manipulates the signal frame the *host* built for
++ * a stub process. aarch64 makes this markedly simpler than x86:
++ *
++ *   - the faulting address is a first-class member of mcontext_t, so there is
++ *     nothing to dig out of a gregs[] array;
++ *   - the FP state lives inline in mcontext.__reserved[] rather than behind a
++ *     pointer into a separate area, so it is already inside the sigstack copy
++ *     UML has in hand and needs no address translation;
++ *   - there are no segment registers to reassemble.
++ */
++#include <linux/errno.h>
++#include <linux/string.h>
++#include <sys/ucontext.h>
++#include <sysdep/ptrace.h>
++#include <sysdep/mcontext.h>
++#include <sysdep/stub-data.h>
++#include <stub-data.h>
++#include <arch.h>
++
++void get_regs_from_mc(struct uml_pt_regs *regs, mcontext_t *mc)
++{
++	int i;
++
++	for (i = 0; i < 31; i++)
++		regs->gp[HOST_X0 + i] = mc->regs[i];
++	regs->gp[HOST_SP] = mc->sp;
++	regs->gp[HOST_PC] = mc->pc;
++	regs->gp[HOST_PSTATE] = mc->pstate;
++
++	/*
++	 * x8 holds the syscall number at the SVC that trapped into seccomp.
++	 * Unlike the ptrace path there is no NT_ARM_SYSTEM_CALL to consult here
++	 * -- the stub is stopped in its own SIGSYS handler, not in a
++	 * syscall-entry stop -- and at that point x8 is authoritative.
++	 */
++	regs->gp[HOST_SYSCALL_NR] = mc->regs[8];
++	regs->gp[HOST_ORIG_X0] = mc->regs[0];
++}
++
++void get_mc_from_regs(struct uml_pt_regs *regs, mcontext_t *mc,
++		      int single_stepping)
++{
++	int i;
++
++	for (i = 0; i < 31; i++)
++		mc->regs[i] = regs->gp[HOST_X0 + i];
++	mc->sp = regs->gp[HOST_SP];
++	mc->pc = regs->gp[HOST_PC];
++	mc->pstate = regs->gp[HOST_PSTATE];
++
++	/*
++	 * single_stepping is ignored, and must be.
++	 *
++	 * x86 implements it here by setting EFLAGS.TF in the frame the stub is
++	 * about to sigreturn to. arm64's equivalent is PSTATE.SS, which only has
++	 * an effect when MDSCR_EL1.SS is also set -- and MDSCR_EL1 is an EL1
++	 * register that a userspace stub cannot write. There is no way to arm a
++	 * single step from inside the stub.
++	 *
++	 * Single-stepping a guest therefore requires the ptrace path, where
++	 * PTRACE_SINGLESTEP asks the host kernel to do it. arch/um/kernel/ptrace.c
++	 * puts a task that wants single-stepping onto that path; nothing is
++	 * silently dropped here.
++	 */
++}
++
++void mc_set_rip(void *_mc, void *target)
++{
++	mcontext_t *mc = _mc;
++
++	mc->pc = (unsigned long)target;
++}
++
++/*
++ * Locate a record in the mcontext's __reserved chain.
++ *
++ * Bounded on both the individual record sizes and the buffer length: this walks
++ * a structure that lives in memory the guest process could have scribbled on.
++ */
++static void *find_ctx(mcontext_t *mc, unsigned int magic, unsigned int *size)
++{
++	unsigned char *p = (unsigned char *)mc->__reserved;
++	unsigned long left = sizeof(mc->__reserved);
++	unsigned long off = 0;
++
++	while (off + sizeof(struct um_aarch64_ctx) <= left) {
++		struct um_aarch64_ctx *h = (struct um_aarch64_ctx *)(p + off);
++
++		if (h->magic == 0 || h->size == 0)
++			return NULL;
++		if (h->size > left - off)
++			return NULL;
++		if (h->magic == magic) {
++			if (size)
++				*size = h->size;
++			return h;
++		}
++		off += h->size;
++	}
++	return NULL;
++}
++
++/*
++ * FPSIMD record layout, spelled out rather than taken from <asm/sigcontext.h>
++ * so this file does not depend on which host headers happen to be installed.
++ * Matches struct fpsimd_context in the arm64 uapi.
++ */
++struct um_fpsimd_context {
++	struct um_aarch64_ctx head;
++	unsigned int fpsr;
++	unsigned int fpcr;
++	__uint128_t vregs[32];
++};
++
++int get_stub_state(struct uml_pt_regs *regs, struct stub_data *data,
++		   unsigned long *fp_size_out)
++{
++	struct um_fpsimd_context *fp;
++	unsigned int size = 0;
++	mcontext_t *mcontext;
++
++	/* mctx_offset is verified by wait_stub_done_seccomp */
++	mcontext = (void *)&data->sigstack[data->mctx_offset];
++
++	get_regs_from_mc(regs, mcontext);
++
++	/*
++	 * TPIDR_EL0 is not in the mcontext -- the host does not save it in a
++	 * signal frame, because on a real kernel it is per-thread state the
++	 * scheduler restores rather than something a handler can change. Under
++	 * UML the guest's threads all live in one stub process, so UML has to
++	 * track it, and the stub captured it for us on the way in.
++	 *
++	 * Reading it back rather than assuming it matters because the guest can
++	 * write TPIDR_EL0 itself with a single unprivileged "msr"; glibc and musl
++	 * both do exactly that when they set up the initial thread. See
++	 * stub_seccomp_save_state().
++	 */
++	regs->gp[HOST_TLS] = data->arch_data.tls;
++
++	fp = find_ctx(mcontext, UM_FPSIMD_MAGIC, &size);
++	if (!fp || size < sizeof(*fp))
++		return -EINVAL;
++
++	if (fp_size_out)
++		*fp_size_out = sizeof(fp->vregs) + sizeof(fp->fpsr) +
++			       sizeof(fp->fpcr);
++
++	if (sizeof(fp->vregs) + sizeof(fp->fpsr) + sizeof(fp->fpcr) >
++	    host_fp_size)
++		return -ENOSPC;
++
++	/*
++	 * regs->fp mirrors the host's NT_PRFPREG / NT_ARM_SVE layout, which
++	 * begins with the 32 V registers followed by fpsr and fpcr -- the same
++	 * order as struct user_fpsimd_state, and the reverse of the order inside
++	 * fpsimd_context, hence the two copies rather than one.
++	 */
++	memcpy(regs->fp, fp->vregs, sizeof(fp->vregs));
++	memcpy((unsigned char *)regs->fp + sizeof(fp->vregs), &fp->fpsr,
++	       sizeof(fp->fpsr));
++	memcpy((unsigned char *)regs->fp + sizeof(fp->vregs) + sizeof(fp->fpsr),
++	       &fp->fpcr, sizeof(fp->fpcr));
++
++	return 0;
++}
++
++int set_stub_state(struct uml_pt_regs *regs, struct stub_data *data,
++		   int single_stepping)
++{
++	struct um_fpsimd_context *fp;
++	unsigned int size = 0;
++	mcontext_t *mcontext;
++
++	/* mctx_offset is verified by wait_stub_done_seccomp */
++	mcontext = (void *)&data->sigstack[data->mctx_offset];
++
++	if ((unsigned long)mcontext < (unsigned long)data->sigstack ||
++	    (unsigned long)mcontext >
++			(unsigned long)data->sigstack +
++			sizeof(data->sigstack) - sizeof(*mcontext))
++		return -EINVAL;
++
++	get_mc_from_regs(regs, mcontext, single_stepping);
++
++	fp = find_ctx(mcontext, UM_FPSIMD_MAGIC, &size);
++	if (!fp || size < sizeof(*fp))
++		return -EINVAL;
++
++	memcpy(fp->vregs, regs->fp, sizeof(fp->vregs));
++	memcpy(&fp->fpsr, (unsigned char *)regs->fp + sizeof(fp->vregs),
++	       sizeof(fp->fpsr));
++	memcpy(&fp->fpcr,
++	       (unsigned char *)regs->fp + sizeof(fp->vregs) + sizeof(fp->fpsr),
++	       sizeof(fp->fpcr));
++
++	/*
++	 * Guest TLS. x86-64 has to hand FS_BASE/GS_BASE to the stub because they
++	 * are only settable via arch_prctl; arm64's TPIDR_EL0 is writable at
++	 * EL0, so all that is needed is to tell the stub the value and let it
++	 * install it with a single "msr" on resume.
++	 */
++	if (data->arch_data.tls != regs->gp[HOST_TLS]) {
++		data->arch_data.tls = regs->gp[HOST_TLS];
++		data->arch_data.sync |= STUB_SYNC_TLS;
++	}
++
++	return 0;
++}
+diff -ruN linux-rc4-git/arch/arm64/um/os-Linux/registers.c /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/os-Linux/registers.c
+--- a/arch/arm64/um/os-Linux/registers.c	1970-01-01 07:00:00
++++ b/arch/arm64/um/os-Linux/registers.c	2026-10-21 20:22:38
+@@ -0,0 +1,290 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Host register access for ARCH=um SUBARCH=arm64.
++ *
++ * arm64 has no PTRACE_GETREGS/PTRACE_SETREGS: everything goes through
++ * PTRACE_GETREGSET/PTRACE_SETREGSET with an explicit note type. That is not
++ * merely a spelling difference, because the syscall number is not part of the
++ * primary register set at all -- it lives in its own NT_ARM_SYSTEM_CALL regset,
++ * and it is the only way to change or cancel a syscall. x86 gets the equivalent
++ * for free as orig_ax inside user_regs_struct.
++ */
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ptrace.h>
++#include <sys/uio.h>
++#include <sys/mman.h>
++#include <linux/elf.h>
++#include <longjmp.h>
++#include <sysdep/ptrace.h>
++#include <sysdep/ptrace_user.h>
++#include <registers.h>
++
++static unsigned long ptrace_fpregset;
++unsigned long host_fp_size;
++
++static int getregset(int pid, int which, void *buf, size_t len, size_t *out_len)
++{
++	struct iovec iov = { .iov_base = buf, .iov_len = len };
++
++	if (ptrace(PTRACE_GETREGSET, pid, (void *)(long)which, &iov) < 0)
++		return -errno;
++	if (out_len)
++		*out_len = iov.iov_len;
++	return 0;
++}
++
++static int setregset(int pid, int which, void *buf, size_t len)
++{
++	struct iovec iov = { .iov_base = buf, .iov_len = len };
++
++	if (ptrace(PTRACE_SETREGSET, pid, (void *)(long)which, &iov) < 0)
++		return -errno;
++	return 0;
++}
++
++int get_fp_registers(int pid, unsigned long *regs)
++{
++	return getregset(pid, ptrace_fpregset, regs, host_fp_size, NULL);
++}
++
++int put_fp_registers(int pid, unsigned long *regs)
++{
++	return setregset(pid, ptrace_fpregset, regs, host_fp_size);
++}
++
++/*
++ * Read the guest's general-purpose registers.
++ *
++ * Only the first UM_FRAME_SIZE bytes of gp[] correspond to the host's
++ * NT_PRSTATUS regset; the two slots above that are synthesised here:
++ *
++ *   HOST_SYSCALL_NR  read from NT_ARM_SYSTEM_CALL. x8 also holds the number at a
++ *                    syscall-entry stop, but relying on x8 would be wrong the
++ *                    moment the guest is stopped anywhere else, and x8 is not
++ *                    writable as a syscall selector in any case.
++ *
++ *   HOST_ORIG_X0     x0 as it stands now. UML only inspects registers at a
++ *                    syscall-entry stop (PTRACE_SYSEMU stops before the syscall
++ *                    runs, and the seccomp path traps at the SVC), so x0 still
++ *                    holds the first argument rather than a return value. This
++ *                    is what makes a later UPT_RESTART_SYSCALL able to put the
++ *                    argument back after the host has overwritten x0 with
++ *                    -ERESTARTSYS.
++ */
++int get_host_regs(int pid, unsigned long *regs)
++{
++	unsigned long tls = 0;
++	int scno = -1;
++	int err;
++
++	err = getregset(pid, NT_PRSTATUS, regs, UM_FRAME_SIZE, NULL);
++	if (err)
++		return err;
++
++	regs[HOST_ORIG_X0] = regs[HOST_X0];
++
++	/*
++	 * Not every stop is a syscall stop, and the host refuses the regset
++	 * outside one. That is not an error: leave the slot as "no syscall".
++	 */
++	if (getregset(pid, NT_ARM_SYSTEM_CALL, &scno, sizeof(scno), NULL))
++		scno = -1;
++	regs[HOST_SYSCALL_NR] = (unsigned long)(long)scno;
++
++	/*
++	 * TPIDR_EL0. Always available, unlike the syscall regset, because it is
++	 * ordinary thread state rather than something meaningful only at a
++	 * syscall stop.
++	 */
++	if (getregset(pid, NT_ARM_TLS, &tls, sizeof(tls), NULL))
++		tls = 0;
++	regs[HOST_TLS] = tls;
++
++	return 0;
++}
++
++/*
++ * Write the guest's general-purpose registers back.
++ *
++ * NT_ARM_SYSTEM_CALL is deliberately NOT written here, and that is the whole
++ * point of this comment.
++ *
++ * On x86 the syscall number is orig_ax, an ordinary member of the register set,
++ * so restoring registers restores it too and UML can treat it as part of the
++ * thread's state. On arm64 it is a separate regset that does not describe
++ * "state" at all: it selects which syscall the *currently stopped* syscall entry
++ * will execute. Writing it during a general register restore therefore does not
++ * reinstate a thread's number, it redirects whatever syscall the stub happens to
++ * be sitting in.
++ *
++ * That is harmless while one guest thread owns a stub process, and actively
++ * wrong as soon as two do -- which is exactly what a multi-threaded guest gives
++ * you, because all threads of an mm share a single stub. Restoring thread A
++ * while the stub is stopped in thread B's syscall entry rewrites B's syscall
++ * number with A's saved one, and the guest then executes a syscall nobody asked
++ * for. Observed as dpkg-deb's threaded lzma decoder issuing syscall 0x8000 --
++ * the byte count of the read() it was actually in.
++ *
++ * The number is instead set only where UML genuinely means to change the
++ * syscall in flight: ptrace_set_syscall_nr(), used for cancellation and by the
++ * boot-time capability check.
++ */
++int put_host_regs(int pid, unsigned long *regs)
++{
++	int err;
++
++	err = setregset(pid, NT_PRSTATUS, regs, UM_FRAME_SIZE);
++	if (err)
++		return err;
++
++	/*
++	 * TPIDR_EL0 is not part of NT_PRSTATUS on arm64, so guest TLS has to be
++	 * pushed separately or a switch between two guest threads in the same
++	 * stub process would leave the previous thread's TLS in place. Unlike
++	 * the syscall number, this *is* per-thread state, so restoring it here
++	 * is correct.
++	 */
++	setregset(pid, NT_ARM_TLS, &regs[HOST_TLS], sizeof(unsigned long));
++
++	return 0;
++}
++
++/*
++ * Inspect and rewrite the syscall a stopped tracee is about to make.
++ *
++ * These are the *only* places NT_ARM_SYSTEM_CALL is written, deliberately: it
++ * selects the syscall currently in flight rather than describing thread state,
++ * so it must never be touched as part of a general register restore. See the
++ * comment above put_host_regs().
++ */
++long ptrace_get_syscall_nr(int pid)
++{
++	int scno = -1;
++	int err;
++
++	err = getregset(pid, NT_ARM_SYSTEM_CALL, &scno, sizeof(scno), NULL);
++	if (err) {
++		errno = -err;
++		return -1;
++	}
++	errno = 0;
++	return scno;
++}
++
++int ptrace_set_syscall_nr(int pid, long nr)
++{
++	int scno = (int)nr;
++
++	return setregset(pid, NT_ARM_SYSTEM_CALL, &scno, sizeof(scno));
++}
++
++int ptrace_set_syscall_ret(int pid, long val)
++{
++	unsigned long regs[MAX_REG_NR];
++	int err;
++
++	/*
++	 * The return value is just x0, but arm64 has no PTRACE_POKEUSER, so the
++	 * whole GPR set has to be read back, modified and rewritten.
++	 */
++	err = getregset(pid, NT_PRSTATUS, regs, UM_FRAME_SIZE, NULL);
++	if (err)
++		return err;
++
++	regs[HOST_X0] = (unsigned long)val;
++
++	return setregset(pid, NT_PRSTATUS, regs, UM_FRAME_SIZE);
++}
++
++const char *ptrace_reg_name(int idx)
++{
++	static const char * const xname[] = {
++		"X0",  "X1",  "X2",  "X3",  "X4",  "X5",  "X6",  "X7",
++		"X8",  "X9",  "X10", "X11", "X12", "X13", "X14", "X15",
++		"X16", "X17", "X18", "X19", "X20", "X21", "X22", "X23",
++		"X24", "X25", "X26", "X27", "X28", "X29", "X30",
++	};
++
++	if (idx >= HOST_X0 && idx <= HOST_X30)
++		return xname[idx - HOST_X0];
++	if (idx == HOST_SP)
++		return "SP";
++	if (idx == HOST_PC)
++		return "PC";
++	if (idx == HOST_PSTATE)
++		return "PSTATE";
++	if (idx == HOST_ORIG_X0)
++		return "ORIG_X0";
++	if (idx == HOST_SYSCALL_NR)
++		return "SYSCALL_NR";
++	return "";
++}
++
++/*
++ * Size the FP regset once, against a live stub process.
++ *
++ * NT_PRFPREG only, deliberately. It yields struct user_fpsimd_state --
++ * { vregs[32], fpsr, fpcr } -- and every consumer of uml_pt_regs.fp in this
++ * port reads it as exactly that: the ptrace regset view in arch/arm64/um/ptrace.c,
++ * the signal frame marshalling in arch/arm64/um/signal.c, and the stub state
++ * copies in os-Linux/mcontext.c.
++ *
++ * NT_ARM_SVE is *not* used even where the host supports it. Its buffer begins
++ * with a struct user_sve_header and its register layout depends on the current
++ * vector length, so treating it as a user_fpsimd_state would misread every
++ * field. Supporting SVE properly means teaching all three of those places about
++ * the header and the VL, plus emitting an sve_context record in the guest's
++ * signal frame; until that exists, quietly selecting the SVE regset would be
++ * the same class of bug as the fpsr/fpcr mix-up this comment sits next to --
++ * correct-looking vector data with silently wrong control state.
++ *
++ * The consequence is that a UML/arm64 guest sees FPSIMD and not SVE, which is
++ * accurate: nothing in this port saves or restores Z or P registers, so the
++ * guest must not be told it has them.
++ *
++ * The buffer is deliberately oversized and the kernel reports back how much it
++ * actually wrote, which is the same trick x86 uses for XSTATE.
++ */
++int arch_init_registers(int pid)
++{
++	size_t probe_len = 2 * 1024 * 1024;
++	size_t got = 0;
++	void *buf;
++	int ret;
++
++	buf = mmap(NULL, probe_len, PROT_READ | PROT_WRITE,
++		   MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
++	if (buf == MAP_FAILED)
++		return -ENOMEM;
++
++	ptrace_fpregset = NT_PRFPREG;
++	ret = getregset(pid, ptrace_fpregset, buf, probe_len, &got);
++
++	munmap(buf, probe_len);
++
++	host_fp_size = got;
++
++	return ret;
++}
++
++unsigned long get_thread_reg(int reg, jmp_buf *buf)
++{
++	switch (reg) {
++	case HOST_PC:
++		/*
++		 * A longjmp resumes at the saved return address, so for a
++		 * jmp_buf the link register *is* the instruction pointer.
++		 */
++		return buf[0]->__x30;
++	case HOST_SP:
++		return buf[0]->__sp;
++	case HOST_X29:
++		return buf[0]->__x29;
++	default:
++		printk(UM_KERN_ERR "get_thread_reg - unknown register %d\n",
++		       reg);
++		return 0;
++	}
++}

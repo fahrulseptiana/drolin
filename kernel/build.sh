@@ -39,12 +39,21 @@ esac
 
 TREE="$HERE/src/linux-$KERNEL_VERSION"
 
-# The pinned tree carries an arm64 UML subarch as a patch. Upstream's UML
-# subarch lives under arch/x86/um; this patch adds arch/arm64/um and the
-# generic hooks it needs. It is applied once and stamped so a re-run is cheap.
+# The pinned tree carries an arm64 UML subarch as a patch series. Upstream's
+# UML subarch lives under arch/x86/um; the series adds arch/arm64/um and the
+# generic hooks it needs, one layer per file. It is applied once, in filename
+# order, and stamped so a re-run is cheap.
+apply_patches() {
+    tree=$1
+    for patch_file in "$HERE"/patches/*.patch; do
+        echo "  $(basename "$patch_file")"
+        (cd "$tree" && patch -p1 -f < "$patch_file")
+    done
+}
+
 if [ "$SUBARCH" = arm64 ] && [ ! -f "$TREE/.drolin-arm64-patched" ]; then
-    echo "applying the arm64 UML subarch patch"
-    (cd "$TREE" && patch -p1 -f < "$HERE/patches/um-arm64.patch")
+    echo "applying the arm64 UML subarch patch series"
+    apply_patches "$TREE"
     # patch(1) does not preserve the executable bit on a new file, and this
     # script is invoked directly by the vDSO Makefile. A non-executable script
     # makes the offsets header empty without failing the build.
@@ -53,7 +62,7 @@ if [ "$SUBARCH" = arm64 ] && [ ! -f "$TREE/.drolin-arm64-patched" ]; then
     touch "$TREE/.drolin-arm64-patched"
 fi
 if [ "$SUBARCH" = arm64 ] && [ ! -d "$TREE/arch/arm64/um" ]; then
-    echo "the arm64 UML subarch patch did not produce arch/arm64/um" >&2
+    echo "the arm64 UML subarch patch series did not produce arch/arm64/um" >&2
     exit 3
 fi
 OUT=${DROLIN_KERNEL_OUT:-$HERE/build}

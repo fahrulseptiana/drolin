@@ -1,0 +1,287 @@
+diff -ruN linux-rc4-git/arch/um/os-Linux/elf_aux.c /Users/irul/Kitchen/linux-um-arm64/arch/um/os-Linux/elf_aux.c
+--- a/arch/um/os-Linux/elf_aux.c	2026-10-21 20:44:44
++++ b/arch/um/os-Linux/elf_aux.c	2026-10-21 20:22:39
+@@ -16,6 +16,10 @@
+ #include "internal.h"
+ #include <linux/swab.h>
+ 
++#ifndef AT_MINSIGSTKSZ
++#define AT_MINSIGSTKSZ 51
++#endif
++
+ #if __BITS_PER_LONG == 64
+ typedef Elf64_auxv_t elf_auxv_t;
+ #else
+@@ -25,7 +29,37 @@
+ /* These are initialized very early in boot and never changed */
+ char * elf_aux_platform;
+ long elf_aux_hwcap;
++/*
++ * AT_HWCAP2 matters on arm64, where the feature space outgrew a single word
++ * long ago (AT_HWCAP2 carries SVE2, MTE, the crypto extensions and more). x86
++ * never populates it, so it simply stays zero there.
++ */
++long elf_aux_hwcap2;
+ 
++/*
++ * AT_MINSIGSTKSZ: the smallest alternate signal stack this host will accept as
++ * sufficient, published by the kernel because on some architectures it is not a
++ * constant.
++ *
++ * It is not a constant on arm64. setup_sigframe_layout() sizes a signal frame
++ * from what the CPU supports and from what the signalled task has executed --
++ * an SVE record scales with the vector length, and SME adds za and zt records
++ * on top. Two run domains differing only in -cpu report 4720 and 9984 here,
++ * for the same architecture and the same kernel.
++ *
++ * UML cares because the stub takes its signals on an alternate stack that is a
++ * fixed-size member of struct stub_data, and the frame written there is sized
++ * by the host, not by UML. Anything that reasons about that buffer must reason
++ * from this number rather than from a measurement taken on one machine; see
++ * check_stub_sigstack().
++ *
++ * Zero if the host does not publish it. arm64 has since v5.5, and x86 since
++ * v5.16 (get_sigframe_size(), which grows with XSAVE state much as arm64's
++ * grows with the vector length), so on the hosts UML actually runs on this is
++ * usually populated.
++ */
++long elf_aux_min_sigstack;
++
+ __init void scan_elf_aux( char **envp)
+ {
+ 	elf_auxv_t * auxv;
+@@ -36,6 +70,12 @@
+ 		switch ( auxv->a_type ) {
+ 			case AT_HWCAP:
+ 				elf_aux_hwcap = auxv->a_un.a_val;
++				break;
++			case AT_HWCAP2:
++				elf_aux_hwcap2 = auxv->a_un.a_val;
++				break;
++			case AT_MINSIGSTKSZ:
++				elf_aux_min_sigstack = auxv->a_un.a_val;
+ 				break;
+ 			case AT_PLATFORM:
+                                 /* elf.h removed the pointer elements from
+diff -ruN linux-rc4-git/arch/um/os-Linux/file.c /Users/irul/Kitchen/linux-um-arm64/arch/um/os-Linux/file.c
+--- a/arch/um/os-Linux/file.c	2026-10-21 20:44:44
++++ b/arch/um/os-Linux/file.c	2026-10-21 20:22:39
+@@ -568,7 +568,13 @@
+ 
+ void os_flush_stdout(void)
+ {
+-	fflush(stdout);
++	/*
++	 * Nothing to flush: UML's own output goes to fd 1 and fd 2 with
++	 * write(2), deliberately, because referencing the stdio stdout/stderr
++	 * objects pulls copy relocations into the binary that the UML linker
++	 * script has no aligned home for -- which is what makes linking
++	 * against bionic fail. See os_write_stderr() in util.c.
++	 */
+ }
+ 
+ int os_lock_file(int fd, int excl)
+diff -ruN linux-rc4-git/arch/um/os-Linux/helper.c /Users/irul/Kitchen/linux-um-arm64/arch/um/os-Linux/helper.c
+--- a/arch/um/os-Linux/helper.c	2026-10-21 20:44:44
++++ b/arch/um/os-Linux/helper.c	2026-10-21 20:22:39
+@@ -211,8 +211,24 @@
+ 
+ void os_kill_helper_thread(struct os_helper_thread *td)
+ {
++#ifdef __BIONIC__
++	/*
++	 * bionic has no pthread_cancel, and deliberately so -- Android has
++	 * never implemented it, because asynchronous cancellation cannot be
++	 * made safe for arbitrary code.
++	 *
++	 * Both callers (the ubd I/O thread and the SIGIO writer) reach here
++	 * only on a teardown path, so detaching and letting process exit reap
++	 * the thread costs a thread that was about to die anyway. Recorded as a
++	 * limitation rather than hidden: on bionic the thread is not stopped,
++	 * it is abandoned, and a UML that tore down a ubd device and kept
++	 * running would leak one thread per teardown.
++	 */
++	pthread_detach(td->handle);
++#else
+ 	pthread_cancel(td->handle);
+ 	pthread_join(td->handle, NULL);
++#endif
+ 	kfree(td);
+ }
+ 
+diff -ruN linux-rc4-git/arch/um/os-Linux/registers.c /Users/irul/Kitchen/linux-um-arm64/arch/um/os-Linux/registers.c
+--- a/arch/um/os-Linux/registers.c	2026-10-21 20:44:44
++++ b/arch/um/os-Linux/registers.c	2026-10-21 20:22:39
+@@ -21,9 +21,9 @@
+ {
+ 	int err;
+ 
+-	err = ptrace(PTRACE_GETREGS, pid, 0, exec_regs);
++	err = get_host_regs(pid, exec_regs);
+ 	if (err < 0)
+-		return -errno;
++		return err;
+ 
+ 	err = arch_init_registers(pid);
+ 	if (err < 0)
+diff -ruN linux-rc4-git/arch/um/os-Linux/umid.c /Users/irul/Kitchen/linux-um-arm64/arch/um/os-Linux/umid.c
+--- a/arch/um/os-Linux/umid.c	2026-10-21 20:44:44
++++ b/arch/um/os-Linux/umid.c	2026-10-21 20:22:39
+@@ -30,6 +30,14 @@
+ 	char dir[512] = { '\0' };
+ 	int len, err;
+ 
++	/*
++	 * A previous call failed and freed it. Say so rather than dereferencing
++	 * it below: make_umid() retries with a random umid, so this is reached
++	 * whenever the first attempt failed.
++	 */
++	if (uml_dir == NULL)
++		return -ENOENT;
++
+ 	if (*uml_dir == '~') {
+ 		char *home = getenv("HOME");
+ 
+@@ -258,7 +266,19 @@
+ 	if (umid_setup)
+ 		return 0;
+ 
+-	make_uml_dir();
++	/*
++	 * Failing this leaves uml_dir NULL, and every use of it below is a
++	 * plain dereference -- the first, strscpy() of a NULL source, panics
++	 * the kernel as "Segfault with no mm" with make_umid in the backtrace
++	 * and nothing pointing at the real cause a few lines above.
++	 *
++	 * It is not a hypothetical. The default uml_dir is under $HOME, and a
++	 * read-only or absent home directory is ordinary on a phone, in a
++	 * container, or under any service manager that runs UML with HOME=/.
++	 */
++	err = make_uml_dir();
++	if (err)
++		goto err;
+ 
+ 	if (*umid == '\0') {
+ 		strscpy(tmp, uml_dir);
+@@ -392,6 +412,27 @@
+ static void remove_umid_dir(void)
+ {
+ 	char *dir, err;
++
++	/*
++	 * make_uml_dir() leaves uml_dir NULL when it could not create the
++	 * directory, and this is an exitcall: it runs on every shutdown
++	 * whatever happened at boot. Without this check the strlen() below
++	 * faults at address zero and the kernel panics as it halts --
++	 *
++	 *	Kernel panic - not syncing: Kernel mode fault at addr 0x0
++	 *	 [<...>] do_uml_exitcalls
++	 *
++	 * -- with the backtrace pointing at the exitcall loop and nothing at
++	 * the directory that was never made. Every other user of uml_dir is
++	 * downstream of a make_umid() that has already returned an error, so
++	 * this is the only one that has to look.
++	 *
++	 * It is the ordinary case, not a corner: the default uml_dir sits
++	 * under $HOME, and a bare shell with no writable home is exactly how
++	 * someone runs this the first time.
++	 */
++	if (uml_dir == NULL)
++		return;
+ 
+ 	dir = malloc(strlen(uml_dir) + UMID_LEN + 1);
+ 	if (!dir)
+diff -ruN linux-rc4-git/arch/um/os-Linux/user_syms.c /Users/irul/Kitchen/linux-um-arm64/arch/um/os-Linux/user_syms.c
+--- a/arch/um/os-Linux/user_syms.c	2026-10-21 20:44:44
++++ b/arch/um/os-Linux/user_syms.c	2026-10-21 20:22:39
+@@ -20,7 +20,24 @@
+ EXPORT_SYMBOL(strstr);
+ #endif
+ 
+-#ifndef __x86_64__
++/*
++ * Who exports memcpy/memmove/memset differs per subarch, and exactly one of
++ * them must:
++ *
++ *   i386   -- <asm/string_32.h> defines __HAVE_ARCH_MEMCPY, so lib/string.c
++ *             does not build them, and nothing else exports the libc versions
++ *             the compiler emits calls to. This file has to.
++ *   x86_64 -- same __HAVE_ARCH_MEMCPY, but arch/x86/lib/memcpy_64.S and friends
++ *             are linked in via subarch-y and carry their own EXPORT_SYMBOL.
++ *   arm64  -- arch/arm64/um/asm/string.h deliberately defines no __HAVE_ARCH_*,
++ *             because arch/arm64/lib is not built for ARCH=um, so lib/string.c
++ *             supplies and exports the generic C versions.
++ *
++ * Exporting here as well makes modpost fail the build with "'memcpy' exported
++ * twice", which is only visible once CONFIG_MODULES is on -- so it appeared the
++ * moment arm64 gained module support, not when the subarch was written.
++ */
++#if !defined(__x86_64__) && !defined(__aarch64__)
+ #undef memcpy
+ extern void *memcpy(void *, const void *, size_t);
+ EXPORT_SYMBOL(memcpy);
+diff -ruN linux-rc4-git/arch/um/os-Linux/util.c /Users/irul/Kitchen/linux-um-arm64/arch/um/os-Linux/util.c
+--- a/arch/um/os-Linux/util.c	2026-10-21 20:44:44
++++ b/arch/um/os-Linux/util.c	2026-10-21 20:22:39
+@@ -181,6 +181,32 @@
+  */
+ int vscnprintf(char *buf, size_t size, const char *fmt, va_list args);
+ 
++/*
++ * Write straight to fd 2 rather than through stderr.
++ *
++ * Referencing stdio's stderr object pulls a copy relocation into the UML
++ * binary, and UML's linker script gives the linker no aligned home for one:
++ * linking against bionic then fails with "improper alignment for relocation
++ * R_AARCH64_LDST64_ABS_LO12_NC" on stderr, because bionic's is an 8-byte
++ * pointer and the script places the copy at a 4-byte boundary. glibc builds
++ * never showed it because UML is linked statically against glibc here, and a
++ * static link has no copy relocations at all.
++ *
++ * Nothing is lost: this output is diagnostics, it is line-at-a-time, and it
++ * was already unbuffered in effect.
++ */
++static void os_write_stderr(const char *buf, int len)
++{
++	while (len > 0) {
++		ssize_t n = write(2, buf, len);
++
++		if (n <= 0)
++			return;
++		buf += n;
++		len -= n;
++	}
++}
++
+ void os_info(const char *fmt, ...)
+ {
+ 	char buf[256];
+@@ -192,7 +218,7 @@
+ 
+ 	va_start(list, fmt);
+ 	len = vscnprintf(buf, sizeof(buf), fmt, list);
+-	fwrite(buf, len, 1, stderr);
++	os_write_stderr(buf, len);
+ 	va_end(list);
+ }
+ 
+@@ -204,6 +230,18 @@
+ 
+ 	va_start(list, fmt);
+ 	len = vscnprintf(buf, sizeof(buf), fmt, list);
+-	fwrite(buf, len, 1, stderr);
++	os_write_stderr(buf, len);
+ 	va_end(list);
++}
++
++/*
++ * CPUs the host will actually run us on. Used to pick a default for ncpus=;
++ * sysconf() rather than parsing /proc/cpuinfo because UML must work where /proc
++ * is not mounted, which is the ordinary case inside an app sandbox.
++ */
++int os_nr_cpus_online(void)
++{
++	long n = sysconf(_SC_NPROCESSORS_ONLN);
++
++	return n > 0 ? (int)n : 1;
+ }

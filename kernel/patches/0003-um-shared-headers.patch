@@ -1,0 +1,509 @@
+diff -ruN linux-rc4-git/arch/um/include/shared/arch.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/arch.h
+--- a/arch/um/include/shared/arch.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/arch.h	2026-10-21 20:22:39
+@@ -8,6 +8,16 @@
+ 
+ #include <sysdep/ptrace.h>
+ 
++struct seq_file;
++
++/*
++ * Subarch hooks for /proc/cpuinfo. arch_parse_host_cpu_flags() is fed each line
++ * of the *host's* /proc/cpuinfo during boot; arch_show_cpuinfo() emits the
++ * architecture-specific portion of the guest's.
++ */
++extern void arch_show_cpuinfo(struct seq_file *m);
++extern int arch_parse_host_cpu_flags(char *line);
++
+ extern void arch_check_bugs(void);
+ extern int arch_fixup(unsigned long address, struct uml_pt_regs *regs);
+ extern void arch_examine_signal(int sig, struct uml_pt_regs *regs);
+diff -ruN linux-rc4-git/arch/um/include/shared/as-layout.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/as-layout.h
+--- a/arch/um/include/shared/as-layout.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/as-layout.h	2026-10-21 20:22:39
+@@ -23,7 +23,36 @@
+ #define STUB_START stub_start
+ #define STUB_CODE STUB_START
+ #define STUB_DATA (STUB_CODE + UM_KERN_PAGE_SIZE)
++/*
++ * One page of bookkeeping plus a signal stack. In SECCOMP mode the host kernel
++ * writes a complete signal frame onto that stack when it delivers SIGSYS to the
++ * stub, so it has to be big enough for the largest frame this host can produce.
++ *
++ * On x86 one page is comfortable. On arm64 it is not: sizeof(mcontext_t) alone
++ * is 4384 bytes, because the architecture reserves __reserved[4096] for the
++ * FPSIMD/SVE/SME records, and a measured frame is 4576 bytes -- larger than a
++ * 4 KiB page before siginfo is even counted. arm64 publishes the real
++ * requirement in AT_MINSIGSTKSZ, which is 4720 on a plain Cortex-A76 and 9984
++ * on a host with 512-bit SVE, so the size is a property of the host rather than
++ * a constant that can be measured once.
++ *
++ * Four pages therefore, giving a 12 KiB stack at 4 KiB pages, which covers
++ * every AT_MINSIGSTKSZ seen so far with room to spare. At 16 KiB pages a single
++ * page is already larger than that, so the layout is unchanged there.
++ *
++ * A power of two is required, not merely tidy: init_new_context() allocates
++ * this with __get_free_pages(..., ilog2(STUB_DATA_PAGES)), so a non-power-of-two
++ * would silently allocate fewer pages than the structure occupies.
++ *
++ * The remaining risk -- a host whose AT_MINSIGSTKSZ exceeds even this -- is not
++ * papered over: check_stub_sigstack() compares the two at boot and refuses
++ * SECCOMP mode with a message naming both numbers.
++ */
++#if defined(__aarch64__) && UM_KERN_PAGE_SIZE < 16384
++#define STUB_DATA_PAGES 4
++#else
+ #define STUB_DATA_PAGES 2
++#endif
+ #define STUB_SIZE ((1 + STUB_DATA_PAGES) * UM_KERN_PAGE_SIZE)
+ #define STUB_END (STUB_START + STUB_SIZE)
+ 
+diff -ruN linux-rc4-git/arch/um/include/shared/init.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/init.h
+--- a/arch/um/include/shared/init.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/init.h	2026-10-21 20:22:39
+@@ -43,6 +43,28 @@
+ 
+ #include <linux/compiler_types.h>
+ 
++/*
++ * All this header needs from the kernel's compiler attributes is __section and
++ * __used, and reaching them through <linux/compiler_types.h> is not reliable
++ * here. This header is also used by the USER_CFLAGS objects, which compile
++ * against the host's sysroot rather than with -nostdinc, so a sysroot that
++ * ships its own linux/compiler_types.h wins the include and the kernel's copy
++ * is never seen.
++ *
++ * The Android NDK does exactly that: its sysroot carries a 265-byte uapi stub
++ * of that name which defines neither macro. The include then succeeds, __init
++ * expands to a bare __section(...), and every __init in UML becomes "expected
++ * parameter declarator" -- an error that says nothing about the real cause.
++ * The host glibc sysroot has no such file, which is why this only appears when
++ * building against bionic.
++ */
++#ifndef __section
++#define __section(s)	__attribute__((__section__(s)))
++#endif
++#ifndef __used
++#define __used		__attribute__((__used__))
++#endif
++
+ /* These are for everybody (although not all archs will actually
+    discard it in modules) */
+ #define __init		__section(".init.text")
+diff -ruN linux-rc4-git/arch/um/include/shared/os.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/os.h
+--- a/arch/um/include/shared/os.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/os.h	2026-10-21 20:22:39
+@@ -186,9 +186,7 @@
+ extern void os_early_checks(void);
+ extern void os_check_bugs(void);
+ extern void check_host_supports_tls(int *supports_tls, int *tls_min);
+-extern void get_host_cpu_features(
+-	void (*flags_helper_func)(char *line),
+-	void (*cache_helper_func)(char *line));
++extern void get_host_cpu_features(int (*line_helper_func)(char *line));
+ 
+ /* mem.c */
+ extern int create_mem_file(unsigned long long len);
+@@ -283,6 +281,7 @@
+ int syscall_stub_flush(struct mm_id *mm_idp);
+ struct stub_syscall *syscall_stub_alloc(struct mm_id *mm_idp);
+ void syscall_stub_dump_error(struct mm_id *mm_idp);
++int syscall_stub_free_slots(struct mm_id *mm_idp);
+ 
+ int map(struct mm_id *mm_idp, unsigned long virt,
+ 	unsigned long len, int prot, int phys_fd,
+@@ -306,6 +305,7 @@
+ extern void *os_epoll_get_data_pointer(int index);
+ extern int os_epoll_triggered(int index, int events);
+ extern int os_event_mask(enum um_irq_type irq_type);
++extern int os_nr_cpus_online(void);
+ extern int os_setup_epoll(void);
+ extern int os_add_epoll_fd(int events, int fd, void *data);
+ extern int os_mod_epoll_fd(int events, int fd, void *data);
+diff -ruN linux-rc4-git/arch/um/include/shared/ptrace_user.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/ptrace_user.h
+--- a/arch/um/include/shared/ptrace_user.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/ptrace_user.h	2026-10-21 20:22:39
+@@ -9,7 +9,11 @@
+ #include <sys/ptrace.h>
+ #include <sysdep/ptrace_user.h>
+ 
+-extern int ptrace_getregs(long pid, unsigned long *regs_out);
+-extern int ptrace_setregs(long pid, unsigned long *regs_in);
++/*
++ * ptrace_getregs()/ptrace_setregs() used to live here as a second, identical
++ * spelling of get_host_regs()/put_host_regs() in <registers.h>. Having two
++ * names for one operation meant every subarch had to implement both; there is
++ * now one, and it is the one that can express arm64's split regsets.
++ */
+ 
+ #endif
+diff -ruN linux-rc4-git/arch/um/include/shared/registers.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/registers.h
+--- a/arch/um/include/shared/registers.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/registers.h	2026-10-21 20:22:39
+@@ -8,6 +8,39 @@
+ 
+ #include <sysdep/ptrace.h>
+ 
++/*
++ * Transfer the general-purpose register file to/from a stub process.
++ *
++ * These used to be open-coded PTRACE_GETREGS/PTRACE_SETREGS calls. Those
++ * requests are x86 (and a few other architectures) only: arm64 implements the
++ * regset interface exclusively, and there is no PTRACE_GETREGS to call. The
++ * subarch also uses these to fill in any register state that does not live in
++ * the host's primary regset -- on arm64 the syscall number, which is reachable
++ * only through NT_ARM_SYSTEM_CALL.
++ */
++extern int get_host_regs(int pid, unsigned long *regs);
++extern int put_host_regs(int pid, unsigned long *regs);
++
++/* Human-readable name for gp[] index @idx, or "" -- used by the crash dump. */
++extern const char *ptrace_reg_name(int idx);
++
++/*
++ * Inspect and rewrite the syscall a stopped tracee is about to make.
++ *
++ * These were open-coded as PTRACE_PEEKUSER/PTRACE_POKEUSER at
++ * PT_SYSCALL_NR_OFFSET. That works on x86, where the syscall number lives in
++ * orig_ax inside the ptrace user area. arm64 implements neither request, and
++ * its syscall number is not in the user area at all: it is reachable only
++ * through the NT_ARM_SYSTEM_CALL regset, which is also the only way to cancel a
++ * syscall (by writing -1).
++ *
++ * ptrace_get_syscall_nr() returns the number, or -1 with errno set.
++ * The setters return 0 or a negative errno.
++ */
++extern long ptrace_get_syscall_nr(int pid);
++extern int ptrace_set_syscall_nr(int pid, long nr);
++extern int ptrace_set_syscall_ret(int pid, long val);
++
+ extern int init_pid_registers(int pid);
+ extern void get_safe_registers(unsigned long *regs, unsigned long *fp_regs);
+ extern int get_fp_registers(int pid, unsigned long *regs);
+diff -ruN linux-rc4-git/arch/um/include/shared/skas/mm_id.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/skas/mm_id.h
+--- a/arch/um/include/shared/skas/mm_id.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/skas/mm_id.h	2026-10-21 20:22:39
+@@ -21,6 +21,19 @@
+ 	int syscall_fd_map[STUB_MAX_FDS];
+ };
+ 
++/*
++ * Sparse's lock annotations, normally from <linux/compiler_types.h>. This
++ * header is reached by USER_CFLAGS objects too, and a sysroot that ships its
++ * own linux/compiler_types.h shadows the kernel's -- the Android NDK does.
++ * Without these the declarations below parse as function definitions.
++ */
++#ifndef __acquires
++#define __acquires(x)
++#endif
++#ifndef __releases
++#define __releases(x)
++#endif
++
+ struct mutex *__get_turnstile(struct mm_id *mm_id);
+ void enter_turnstile(struct mm_id *mm_id) __acquires(__get_turnstile(mm_id));
+ void exit_turnstile(struct mm_id *mm_id) __releases(__get_turnstile(mm_id));
+diff -ruN linux-rc4-git/arch/um/include/shared/skas/skas.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/skas/skas.h
+--- a/arch/um/include/shared/skas/skas.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/skas/skas.h	2026-10-21 20:22:39
+@@ -10,6 +10,15 @@
+ 
+ extern int using_seccomp;
+ 
++/*
++ * Whether the host implements PTRACE_SYSEMU. Where it does not, UML builds the
++ * same semantics out of PTRACE_SYSCALL and a syscall cancellation; see
++ * check_sysemu(). Set once at boot, before any stub exists.
++ */
++extern int have_ptrace_sysemu;
++extern int syscall_cancel_nr;
++extern int have_stub_cycles;
++
+ extern void new_thread_handler(void);
+ extern void handle_syscall(struct uml_pt_regs *regs);
+ extern unsigned long current_stub_stack(void);
+diff -ruN linux-rc4-git/arch/um/include/shared/skas/stub-data.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/skas/stub-data.h
+--- a/arch/um/include/shared/skas/stub-data.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/skas/stub-data.h	2026-10-21 20:22:39
+@@ -14,9 +14,70 @@
+ #include <sysdep/stub-data.h>
+ #include <mm_id.h>
+ 
++/* See the note in skas/mm_id.h: a sysroot's linux/compiler_types.h can shadow
++ * the kernel's, leaving the attribute macros undefined for USER_CFLAGS objects.
++ */
++#ifndef __aligned
++#define __aligned(x)	__attribute__((__aligned__(x)))
++#endif
++#ifndef __section
++#define __section(x)	__attribute__((__section__(x)))
++#endif
++#ifndef __used
++#define __used		__attribute__((__used__))
++#endif
++
++/*
++ * The stub <-> kernel handoff word. The low bit names the side that currently
++ * owns the CPU ("the child may run" / "the kernel may run"); ownership strictly
++ * ping-pongs, so at any moment at most one side is waiting.
++ */
+ #define FUTEX_IN_CHILD 0
+ #define FUTEX_IN_KERN 1
++/*
++ * ORed in by a waiter that is about to park in FUTEX_WAIT. A waker hands
++ * ownership over with an atomic exchange and calls FUTEX_WAKE only if the old
++ * value carried this bit: on this host a FUTEX_WAKE that actually has someone
++ * to wake costs a voluntary context switch (the measured 37k voluntary
++ * switches per benchmark run are exactly these), and even an empty one is a
++ * syscall. When the peer was caught mid-spin, the wake is pure waste.
++ *
++ * The bit can go stale in one benign way: the waiter sets it just after the
++ * waker's exchange already flipped ownership. The waiter then sees the flip in
++ * the fetch_or's old value and never parks, but the bit stays set until the
++ * next exchange clears it, costing that exchange one spurious FUTEX_WAKE.
++ * Rare and harmless; a scheme that cleans the bit up would need a second
++ * atomic on every wait, which is the common path.
++ */
++#define STUB_FUTEX_WAITER 2
+ 
++/* The ownership half of the protocol word, waiter bit masked off. */
++#define STUB_FUTEX_OWNER(v) ((v) & FUTEX_IN_KERN)
++
++/*
++ * 64 covers the cacheline size of every x86-64 and arm64 host this can run on
++ * (Snapdragon's Cortex/Kryo cores included).
++ */
++#define STUB_FUTEX_ALIGN 64
++
++/*
++ * Adaptive-spin bookkeeping, one instance per side, each written only by its
++ * owner (no atomics needed):
++ *
++ *  - streak: consecutive spins that observed the reply within the budget.
++ *    While nonzero, keep spinning: the peer is answering fast.
++ *  - backoff: after a miss, the number of upcoming waits that go straight to
++ *    FUTEX_WAIT before the spin is probed again. Without this an idle or
++ *    compute-heavy guest would burn the full budget on every single wait; with
++ *    it the steady-state cost of a never-hitting spin is one budget per
++ *    STUB_SPIN_BACKOFF waits, while a workload that turns syscall-heavy again
++ *    is picked back up within that many waits.
++ */
++struct stub_spin_state {
++	unsigned short streak;
++	unsigned short backoff;
++};
++
+ struct stub_init_data {
+ 	int seccomp;
+ 
+@@ -56,21 +117,62 @@
+ 	long err;
+ 
+ 	int syscall_data_len;
+-	/* 128 leaves enough room for additional fields in the struct */
+-	struct stub_syscall syscall_data[(UM_KERN_PAGE_SIZE - 128) / sizeof(struct stub_syscall)] __aligned(16);
+ 
++	/*
++	 * The handoff word, alone in a 64-byte slot. Both sides poll it now
++	 * (see stub-futex.h); if it shared a cacheline with anything the peer
++	 * writes -- syscall_data, signal, the spin state -- each such write
++	 * would yank the line from the polling CPU and the spin would spend
++	 * its budget on coherence misses instead of observing the flip. The
++	 * explicit pad keeps the tail of the line empty; init_child_tracking()
++	 * BUILD_BUG_ONs the isolation so a reorder here cannot silently undo
++	 * it.
++	 */
++	unsigned int futex __aligned(STUB_FUTEX_ALIGN);
++	unsigned char futex_pad[STUB_FUTEX_ALIGN - sizeof(unsigned int)];
++
++	/*
++	 * 256 leaves enough room for the fields around the array: 128 bytes
++	 * above, the rest below. The static_assert on sizeof(struct stub_data)
++	 * in mmu.c catches this reserve becoming too small on any page size
++	 * or subarch, because the tail would then push the page-aligned
++	 * sigstack into an extra page.
++	 */
++	struct stub_syscall syscall_data[(UM_KERN_PAGE_SIZE - 256) / sizeof(struct stub_syscall)] __aligned(16);
++
+ 	/* data shared with signal handler (only used in seccomp mode) */
+ 	short restart_wait;
+-	unsigned int futex;
+ 	int signal;
+ 	unsigned short si_offset;
+ 	unsigned short mctx_offset;
+ 
++	/*
++	 * Spin budget in ticks of the timebase behind stub_cycles(), written
++	 * once by the kernel side before the stub first runs; 0 means "park
++	 * immediately" and is what seccomp_spin=0 and hosts without a usable
++	 * constant-rate EL0 counter (x86) get. Ticks of wall time rather than
++	 * an iteration count is deliberate: this class of SoC scales
++	 * 300 MHz - 3.2 GHz, so a loop count would mean a 10x different
++	 * duration depending on the governor's mood, while CNTVCT_EL0 runs at
++	 * a constant rate regardless.
++	 */
++	unsigned int spin_ticks;
++	struct stub_spin_state kern_spin;	/* written by the kernel side only */
++	struct stub_spin_state stub_spin;	/* written by the stub only */
++
+ 	/* seccomp architecture specific state restore */
+ 	struct stub_data_arch arch_data;
+ 
+-	/* Stack for our signal handlers and for calling into . */
+-	unsigned char sigstack[UM_KERN_PAGE_SIZE] __aligned(UM_KERN_PAGE_SIZE);
++	/*
++	 * Stack for our signal handlers and for calling into .
++	 *
++	 * Sized from STUB_DATA_PAGES rather than fixed at one page: in SECCOMP
++	 * mode the host writes a whole signal frame here, and on arm64 that
++	 * frame is larger than a 4 KiB page. See the comment on STUB_DATA_PAGES
++	 * in as-layout.h.
++	 */
++	unsigned char sigstack[(STUB_DATA_PAGES - 1) * UM_KERN_PAGE_SIZE]
++		__aligned(UM_KERN_PAGE_SIZE);
+ };
+ 
+ #endif
+diff -ruN linux-rc4-git/arch/um/include/shared/skas/stub-futex.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/skas/stub-futex.h
+--- a/arch/um/include/shared/skas/stub-futex.h	1970-01-01 07:00:00
++++ b/arch/um/include/shared/skas/stub-futex.h	2026-10-21 20:22:39
+@@ -0,0 +1,110 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Shared halves of the stub <-> kernel handoff: waiter-bit wake elision and
++ * the bounded adaptive spin. Everything here is __always_inline because the
++ * stub side must end up inside .__syscall_stub with no calls out of it.
++ *
++ * Used from both stub_signal_interrupt() (the stub) and
++ * wait_stub_done_seccomp() (the UML kernel thread). The parking step itself
++ * (fetch_or of the waiter bit + FUTEX_WAIT loop) stays in the callers: the
++ * two sides make the futex syscall differently and handle its failure
++ * differently, and hiding that behind one helper obscured more than it saved.
++ *
++ * MEMORY ORDERING. The futex syscalls that used to bracket every handoff are
++ * full barriers, and the whole point of this file is to skip those syscalls;
++ * the ordering must therefore come from the accesses themselves. Every write
++ * that flips ownership is a release (stub_futex_xchg), every read that
++ * decides "the peer is done" is an acquire (stub_futex_load_acquire), so the
++ * data written before the flip -- syscall_data, signal, mctx offsets -- is
++ * visible to whoever observes the flip. This is an arm64-only stale-data
++ * class: x86-TSO gives these guarantees to plain accesses, so no amount of
++ * x86 testing can catch getting it wrong here. See the sysdep stub.h of each
++ * arch for the primitives.
++ */
++#ifndef __STUB_FUTEX_H
++#define __STUB_FUTEX_H
++
++#include <sysdep/stub.h>
++
++/* Streak cap only guards against wraparound; any small value works. */
++#define STUB_SPIN_STREAK_MAX	16
++/* Waits between spin probes while the spin keeps missing. */
++#define STUB_SPIN_BACKOFF	16
++
++/*
++ * Hand ownership of the protocol word to the peer, publishing (release) every
++ * write made before the call. Returns nonzero when the peer parked in
++ * FUTEX_WAIT and a FUTEX_WAKE is actually needed; a peer caught spinning (or
++ * still running) observes the exchange on its own.
++ */
++static __always_inline int
++stub_futex_hand_over(volatile unsigned int *futex, unsigned int to)
++{
++	return stub_futex_xchg(futex, to) & STUB_FUTEX_WAITER;
++}
++
++/*
++ * How long this wait may spin, in stub_cycles() ticks. Zero means "go park".
++ */
++static __always_inline unsigned long
++stub_futex_spin_budget(struct stub_spin_state *s, unsigned int spin_ticks)
++{
++	if (!spin_ticks)
++		return 0;
++
++	if (s->streak)
++		return spin_ticks;
++
++	/* Recent miss: sleep for a while before probing the spin again. */
++	if (s->backoff) {
++		s->backoff--;
++		return 0;
++	}
++
++	return spin_ticks;
++}
++
++/* Record the outcome of an actually-attempted spin. */
++static __always_inline void
++stub_futex_spin_result(struct stub_spin_state *s, int hit)
++{
++	if (hit) {
++		if (s->streak < STUB_SPIN_STREAK_MAX)
++			s->streak++;
++	} else {
++		s->streak = 0;
++		s->backoff = STUB_SPIN_BACKOFF;
++	}
++}
++
++/*
++ * Poll the word until ownership leaves `while_owner`, for at most `ticks`
++ * ticks of wall time. Returns the last value observed, read with acquire
++ * semantics, so on a hit the caller may immediately read the peer's data.
++ *
++ * The bound is wall time by construction, never an iteration count: the
++ * budget must mean the same thing at the governor's 300 MHz floor and its
++ * 3.2 GHz ceiling, and only the constant-rate counter delivers that.
++ */
++static __always_inline unsigned int
++stub_futex_spin(volatile unsigned int *futex, unsigned int while_owner,
++		unsigned long ticks)
++{
++	unsigned int val = stub_futex_load_acquire(futex);
++	unsigned long start;
++
++	if (STUB_FUTEX_OWNER(val) != while_owner || !ticks)
++		return val;
++
++	start = stub_cycles();
++	do {
++		stub_relax();
++		val = stub_futex_load_acquire(futex);
++		if (STUB_FUTEX_OWNER(val) != while_owner)
++			break;
++	} while (stub_cycles() - start < ticks);
++
++	return val;
++}
++
++#endif /* __STUB_FUTEX_H */
+diff -ruN linux-rc4-git/arch/um/include/shared/smp.h /Users/irul/Kitchen/linux-um-arm64/arch/um/include/shared/smp.h
+--- a/arch/um/include/shared/smp.h	2026-10-21 20:44:44
++++ b/arch/um/include/shared/smp.h	2026-10-21 20:22:39
+@@ -5,7 +5,16 @@
+ #if IS_ENABLED(CONFIG_SMP)
+ 
+ extern int uml_ncpus;
++void um_ncpus_init(void);
+ 
++/*
++ * Drop back to one CPU. A setter rather than a plain assignment because
++ * uml_ncpus is a constant on a uniprocessor build, where this is a no-op --
++ * the alternative is an #ifdef at every caller, which is how the ptrace path
++ * came to break the !SMP build.
++ */
++static inline void um_ncpus_force_up(void) { uml_ncpus = 1; }
++
+ int uml_curr_cpu(void);
+ void uml_start_secondary(void *opaque);
+ void uml_ipi_handler(int vector);
+@@ -14,6 +23,8 @@
+ 
+ #define uml_ncpus 1
+ #define uml_curr_cpu() 0
++static inline void um_ncpus_init(void) { }
++static inline void um_ncpus_force_up(void) { }
+ 
+ #endif /* CONFIG_SMP */
+ 

@@ -1,0 +1,565 @@
+diff -ruN linux-rc4-git/arch/arm64/um/vdso/Makefile /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/vdso/Makefile
+--- a/arch/arm64/um/vdso/Makefile	1970-01-01 07:00:00
++++ b/arch/arm64/um/vdso/Makefile	2026-10-21 20:22:38
+@@ -0,0 +1,73 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Building the vDSO image for UML/arm64.
++
++# Objects that go into the vDSO itself
++vobjs-y := vdso-note.o sigreturn.o
++
++# Objects linked into the UML kernel
++obj-y += vdso.o vma.o
++
++vobjs := $(foreach F,$(vobjs-y),$(obj)/$F)
++
++targets += vdso.so vdso.so.dbg vdso.lds vdso-offsets.h $(vobjs-y)
++
++CPPFLAGS_vdso.lds += -P -C
++
++# The vDSO is one guest page. A 16K- or 64K-page host needs the segment
++# alignment to match, so this is derived from the configuration rather than
++# hardcoded to 4096 the way x86 UML does it.
++vdso-pagesize-$(CONFIG_PAGE_SIZE_4KB)  := 4096
++vdso-pagesize-$(CONFIG_PAGE_SIZE_16KB) := 16384
++vdso-pagesize-$(CONFIG_PAGE_SIZE_64KB) := 65536
++vdso-pagesize := $(vdso-pagesize-y)
++
++VDSO_LDFLAGS_vdso.lds = -Wl,-soname=linux-vdso.so.1 \
++	-Wl,-z,max-page-size=$(vdso-pagesize)
++
++VDSO_LDFLAGS = -fPIC -shared -Wl,--hash-style=sysv -z noexecstack \
++	-Wl,--no-undefined -Wl,--build-id=sha1
++
++# $(CLANG_FLAGS) carries --target=; x86's equivalent rule gets away with -m64
++# instead. Without it clang picks the build machine's linker emulation and fails
++# with "cannot represent machine `aarch64'".
++quiet_cmd_vdso = VDSO    $@
++      cmd_vdso = $(CC) -nostdlib -o $@ $(filter --target=%,$(CLANG_FLAGS)) \
++		       $(CC_FLAGS_LTO) $(VDSO_LDFLAGS) \
++		       $(VDSO_LDFLAGS_$(filter %.lds,$(^F))) \
++		       -Wl,-T,$(filter %.lds,$^) $(filter %.o,$^)
++
++$(obj)/vdso.so.dbg: $(obj)/vdso.lds $(vobjs) FORCE
++	$(call if_changed,vdso)
++
++$(obj)/%.so: OBJCOPYFLAGS := -S
++$(obj)/%.so: $(obj)/%.so.dbg FORCE
++	$(call if_changed,objcopy)
++
++$(obj)/vdso.o: $(src)/vdso.S $(obj)/vdso.so
++
++# Symbol offsets, so signal delivery can find __kernel_rt_sigreturn.
++gen-vdsosym := $(src)/gen_vdso_offsets.sh
++quiet_cmd_vdsosym = VDSOSYM $@
++      cmd_vdsosym = $(NM) $< | $(gen-vdsosym) | LC_ALL=C sort > $@
++
++$(obj)/vdso-offsets.h: $(obj)/vdso.so.dbg FORCE
++	$(call if_changed,vdsosym)
++
++$(obj)/vma.o: $(obj)/vdso-offsets.h
++CFLAGS_vma.o += -I$(objtree)/$(obj)
++
++# vDSO code runs in guest userspace: no profiling, no instrumentation, and no
++# stack protector (there is no guest TLS set up when the trampoline runs).
++CFL := -fPIC -O2 -fasynchronous-unwind-tables -fno-stack-protector \
++       -fno-omit-frame-pointer -foptimize-sibling-calls \
++       $(filter -g%,$(KBUILD_CFLAGS))
++
++$(vobjs): KBUILD_CFLAGS += $(CFL)
++
++CFLAGS_REMOVE_vdso-note.o = -pg -fprofile-arcs -ftest-coverage
++CFLAGS_REMOVE_sigreturn.o = -pg -fprofile-arcs -ftest-coverage
++
++KCOV_INSTRUMENT := n
++KASAN_SANITIZE  := n
++UBSAN_SANITIZE  := n
+diff -ruN linux-rc4-git/arch/arm64/um/vdso/gen_vdso_offsets.sh /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/vdso/gen_vdso_offsets.sh
+--- a/arch/arm64/um/vdso/gen_vdso_offsets.sh	1970-01-01 07:00:00
++++ b/arch/arm64/um/vdso/gen_vdso_offsets.sh	2026-10-21 20:22:38
+@@ -0,0 +1,9 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0
++#
++# Emit the offset of each exported vDSO symbol as a #define, so the UML kernel
++# can point a returning signal handler at __kernel_rt_sigreturn without parsing
++# the ELF image at runtime. Mirrors arch/arm64/kernel/vdso/gen_vdso_offsets.sh.
++
++LC_ALL=C
++sed -n -e 's/^\([0-9a-f]*\) . \(__kernel_[a-z0-9_]*\)$/\#define um_vdso_offset_\2\t0x\1/p'
+diff -ruN linux-rc4-git/arch/arm64/um/vdso/sigreturn.S /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/vdso/sigreturn.S
+--- a/arch/arm64/um/vdso/sigreturn.S	1970-01-01 07:00:00
++++ b/arch/arm64/um/vdso/sigreturn.S	2026-10-21 20:22:38
+@@ -0,0 +1,76 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Signal-return trampoline for the UML/arm64 vDSO.
++ *
++ * arm64 userspace cannot return from a signal handler by itself: unlike i386,
++ * there is nowhere to put a trampoline in the signal frame, because the stack is
++ * not executable. glibc and musl on aarch64 therefore do *not* set SA_RESTORER
++ * and rely on the kernel pointing x30 at this symbol. Without it, every guest
++ * signal handler would return to a wild address.
++ *
++ * The CFI directives are what lets gdb and libunwind walk out of a signal
++ * handler and back into the interrupted frame. They mirror
++ * arch/arm64/kernel/vdso/sigreturn.S: the frame base is sp, and the saved
++ * registers live inside the sigcontext at a fixed offset from it.
++ */
++
++#include <linux/linkage.h>
++#include <asm/unistd.h>
++
++/*
++ * Offsets into the rt_sigframe that the unwinder needs. These must agree with
++ * setup_signal_stack_si() in arch/arm64/um/signal.c, which places
++ *	sp -> struct rt_sigframe { siginfo info; struct ucontext uc; }
++ * and puts the register state in uc.uc_mcontext.
++ */
++#define SIGFRAME_SIGINFO_SIZE	128			/* sizeof(struct siginfo) */
++#define UCONTEXT_MCONTEXT_OFF	176			/* offsetof(ucontext, uc_mcontext) */
++#define SIGCONTEXT_REGS_OFF	8			/* offsetof(sigcontext, regs) */
++#define SIGFRAME_REGS_OFF	(SIGFRAME_SIGINFO_SIZE + \
++				 UCONTEXT_MCONTEXT_OFF + SIGCONTEXT_REGS_OFF)
++
++	.text
++
++	.cfi_startproc
++	.cfi_signal_frame
++	.cfi_def_cfa	sp, 0
++	.cfi_offset	x0,  SIGFRAME_REGS_OFF + 0 * 8
++	.cfi_offset	x1,  SIGFRAME_REGS_OFF + 1 * 8
++	.cfi_offset	x2,  SIGFRAME_REGS_OFF + 2 * 8
++	.cfi_offset	x3,  SIGFRAME_REGS_OFF + 3 * 8
++	.cfi_offset	x4,  SIGFRAME_REGS_OFF + 4 * 8
++	.cfi_offset	x5,  SIGFRAME_REGS_OFF + 5 * 8
++	.cfi_offset	x6,  SIGFRAME_REGS_OFF + 6 * 8
++	.cfi_offset	x7,  SIGFRAME_REGS_OFF + 7 * 8
++	.cfi_offset	x8,  SIGFRAME_REGS_OFF + 8 * 8
++	.cfi_offset	x9,  SIGFRAME_REGS_OFF + 9 * 8
++	.cfi_offset	x10, SIGFRAME_REGS_OFF + 10 * 8
++	.cfi_offset	x11, SIGFRAME_REGS_OFF + 11 * 8
++	.cfi_offset	x12, SIGFRAME_REGS_OFF + 12 * 8
++	.cfi_offset	x13, SIGFRAME_REGS_OFF + 13 * 8
++	.cfi_offset	x14, SIGFRAME_REGS_OFF + 14 * 8
++	.cfi_offset	x15, SIGFRAME_REGS_OFF + 15 * 8
++	.cfi_offset	x16, SIGFRAME_REGS_OFF + 16 * 8
++	.cfi_offset	x17, SIGFRAME_REGS_OFF + 17 * 8
++	.cfi_offset	x18, SIGFRAME_REGS_OFF + 18 * 8
++	.cfi_offset	x19, SIGFRAME_REGS_OFF + 19 * 8
++	.cfi_offset	x20, SIGFRAME_REGS_OFF + 20 * 8
++	.cfi_offset	x21, SIGFRAME_REGS_OFF + 21 * 8
++	.cfi_offset	x22, SIGFRAME_REGS_OFF + 22 * 8
++	.cfi_offset	x23, SIGFRAME_REGS_OFF + 23 * 8
++	.cfi_offset	x24, SIGFRAME_REGS_OFF + 24 * 8
++	.cfi_offset	x25, SIGFRAME_REGS_OFF + 25 * 8
++	.cfi_offset	x26, SIGFRAME_REGS_OFF + 26 * 8
++	.cfi_offset	x27, SIGFRAME_REGS_OFF + 27 * 8
++	.cfi_offset	x28, SIGFRAME_REGS_OFF + 28 * 8
++	.cfi_offset	x29, SIGFRAME_REGS_OFF + 29 * 8
++	.cfi_offset	x30, SIGFRAME_REGS_OFF + 30 * 8
++	.cfi_offset	sp,  SIGFRAME_REGS_OFF + 31 * 8
++
++SYM_FUNC_START(__kernel_rt_sigreturn)
++	mov	x8, #__NR_rt_sigreturn
++	svc	#0
++SYM_FUNC_END(__kernel_rt_sigreturn)
++	.cfi_endproc
++
++	.section .note.GNU-stack,"",%progbits
+diff -ruN linux-rc4-git/arch/arm64/um/vdso/vdso-note.S /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/vdso/vdso-note.S
+--- a/arch/arm64/um/vdso/vdso-note.S	1970-01-01 07:00:00
++++ b/arch/arm64/um/vdso/vdso-note.S	2026-10-21 20:22:38
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * A vDSO is a real shared object; give it the usual kernel version note so that
++ * tools which inspect it (and glibc, which parses it out of AT_SYSINFO_EHDR)
++ * see a well-formed DSO.
++ */
++#include <linux/build-salt.h>
++#include <linux/uts.h>
++#include <linux/version.h>
++#include <linux/elfnote.h>
++
++ELFNOTE_START(Linux, 0, "a")
++	.long LINUX_VERSION_CODE
++ELFNOTE_END
++
++BUILD_SALT
+diff -ruN linux-rc4-git/arch/arm64/um/vdso/vdso.S /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/vdso/vdso.S
+--- a/arch/arm64/um/vdso/vdso.S	1970-01-01 07:00:00
++++ b/arch/arm64/um/vdso/vdso.S	2026-10-21 20:22:38
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#include <linux/init.h>
++#include <linux/linkage.h>
++#include <asm/page.h>
++
++	__PAGE_ALIGNED_DATA
++
++	.globl vdso_start, vdso_end
++	.balign PAGE_SIZE
++vdso_start:
++	.incbin "arch/arm64/um/vdso/vdso.so"
++	.balign PAGE_SIZE
++vdso_end:
++
++	.previous
+diff -ruN linux-rc4-git/arch/arm64/um/vdso/vdso.lds.S /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/vdso/vdso.lds.S
+--- a/arch/arm64/um/vdso/vdso.lds.S	1970-01-01 07:00:00
++++ b/arch/arm64/um/vdso/vdso.lds.S	2026-10-21 20:22:38
+@@ -0,0 +1,68 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Linker script for the UML/arm64 vDSO.
++ *
++ * Deliberately minimal. The only thing UML's guest actually needs from a vDSO
++ * is __kernel_rt_sigreturn (see arch/arm64/um/signal.c); it exports no time
++ * functions, because a UML guest's clock_gettime is a syscall into the UML
++ * kernel, which is a function call, not a trap -- a vDSO fast path would save
++ * nothing and would have to be kept in sync with UML's timekeeping.
++ */
++
++#include <asm/page.h>
++
++OUTPUT_FORMAT("elf64-littleaarch64", "elf64-bigaarch64", "elf64-littleaarch64")
++OUTPUT_ARCH(aarch64)
++
++SECTIONS
++{
++	/*
++	 * The vDSO is mapped as a single page by arch_setup_additional_pages(),
++	 * so everything must fit below PAGE_SIZE. PAGE_SIZE, not 4096: on a
++	 * 16K-page host the guest's page size is 16K too.
++	 */
++	. = SIZEOF_HEADERS;
++
++	.hash		: { *(.hash) }			:text
++	.gnu.hash	: { *(.gnu.hash) }
++	.dynsym		: { *(.dynsym) }
++	.dynstr		: { *(.dynstr) }
++	.gnu.version	: { *(.gnu.version) }
++	.gnu.version_d	: { *(.gnu.version_d) }
++	.gnu.version_r	: { *(.gnu.version_r) }
++
++	.note		: { *(.note.*) }		:text	:note
++
++	.dynamic	: { *(.dynamic) }		:text	:dynamic
++
++	.eh_frame_hdr	: { *(.eh_frame_hdr) }		:text	:eh_frame_hdr
++	.eh_frame	: { KEEP (*(.eh_frame)) }	:text
++
++	.rodata		: { *(.rodata*) }		:text
++
++	.text		: { *(.text*) }			:text	=0xd503201f
++
++	/DISCARD/	: {
++		*(.data .data.* .gnu.linkonce.d.* .sdata*)
++		*(.bss .sbss .dynbss .dynsbss)
++		*(.note.GNU-stack)
++		*(.comment)
++	}
++}
++
++PHDRS
++{
++	text		PT_LOAD		FLAGS(5) FILEHDR PHDRS;	/* PF_R|PF_X */
++	dynamic		PT_DYNAMIC	FLAGS(4);		/* PF_R */
++	note		PT_NOTE		FLAGS(4);		/* PF_R */
++	eh_frame_hdr	PT_GNU_EH_FRAME;
++}
++
++VERSION
++{
++	LINUX_2.6.39 {
++	global:
++		__kernel_rt_sigreturn;
++	local: *;
++	};
++}
+diff -ruN linux-rc4-git/arch/arm64/um/vdso/vma.c /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/vdso/vma.c
+--- a/arch/arm64/um/vdso/vma.c	1970-01-01 07:00:00
++++ b/arch/arm64/um/vdso/vma.c	2026-10-21 20:22:38
+@@ -0,0 +1,76 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Map the UML/arm64 vDSO into every guest process.
++ *
++ * Unlike x86-64 UML, where the vDSO is an optimisation, here it is load-bearing:
++ * aarch64 glibc does not set SA_RESTORER, so returning from a guest signal
++ * handler goes through __kernel_rt_sigreturn in this page. A guest without it
++ * would crash on the first signal.
++ */
++#include <linux/slab.h>
++#include <linux/sched.h>
++#include <linux/mm.h>
++#include <linux/init.h>
++#include <linux/binfmts.h>
++#include <asm/page.h>
++#include <asm/elf.h>
++
++#include "vdso-offsets.h"
++
++unsigned long um_vdso_addr;
++static struct page *um_vdso;
++
++extern unsigned long task_size;
++extern char vdso_start[], vdso_end[];
++
++/*
++ * Where a returning signal handler jumps to. Called from
++ * setup_signal_stack_si() for every guest signal that does not carry
++ * SA_RESTORER, which on aarch64 is essentially all of them.
++ */
++unsigned long um_vdso_sigreturn_addr(void)
++{
++	return um_vdso_addr + um_vdso_offset___kernel_rt_sigreturn;
++}
++
++static int __init init_vdso(void)
++{
++	BUG_ON(vdso_end - vdso_start > PAGE_SIZE);
++
++	/*
++	 * Immediately below the top of the guest address space, matching where
++	 * the real arm64 kernel puts it and where x86 UML puts its own.
++	 */
++	um_vdso_addr = task_size - PAGE_SIZE;
++
++	um_vdso = alloc_page(GFP_KERNEL);
++	if (!um_vdso)
++		panic("Cannot allocate vdso\n");
++
++	copy_page(page_address(um_vdso), vdso_start);
++
++	return 0;
++}
++subsys_initcall(init_vdso);
++
++int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
++{
++	struct vm_area_struct *vma;
++	struct mm_struct *mm = current->mm;
++	static struct vm_special_mapping vdso_mapping = {
++		.name = "[vdso]",
++		.pages = &um_vdso,
++	};
++
++	if (mmap_write_lock_killable(mm))
++		return -EINTR;
++
++	vma = _install_special_mapping(mm, um_vdso_addr, PAGE_SIZE,
++				       VM_READ | VM_EXEC |
++				       VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC,
++				       &vdso_mapping);
++
++	mmap_write_unlock(mm);
++
++	return IS_ERR(vma) ? PTR_ERR(vma) : 0;
++}
+--- a/arch/arm64/Makefile.um	1970-01-01 07:00:00
++++ b/arch/arm64/Makefile.um	2026-10-21 20:22:38
+@@ -0,0 +1,72 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++# Build glue for ARCH=um SUBARCH=arm64.
++#
++# Included by arch/um/Makefile as $(HOST_DIR)/Makefile.um. Everything here
++# describes the *host* ABI the UML binary is built against, because for UML the
++# "architecture" is an ordinary aarch64 userspace process.
++
++# Link address of the UML kernel binary. Guest processes live in separate host
++# address spaces under SKAS, so this only has to stay clear of the UML kernel's
++# own mappings of guest physical memory, which are placed above the binary.
++# 0x60000000 matches x86_64 UML and leaves the whole 48-bit VA space above it.
++START := 0x60000000
++
++ELF_ARCH	:= aarch64
++ELF_FORMAT	:= elf64-littleaarch64
++
++CHECKFLAGS	+= -D__aarch64__
++
++# Unlike x86 there is nothing to disable here: the aarch64 psABI has no
++# equivalent of x86's "compile the kernel without SSE" problem, because the
++# kernel side never touches the FP/SIMD registers that the guest owns, and
++# -mgeneral-regs-only would break the host-side code that legitimately does.
++
++LINK-$(CONFIG_LD_SCRIPT_DYN_RPATH) += -Wl,-rpath,/lib
++
++# Building against bionic (the Android NDK) collides with the kernel's own
++# definitions of a set of standard-library names. glibc does not show this:
++# its libc.a is finely split, so the objects carrying memcpy, snprintf and the
++# rest are simply never pulled in once the kernel's definitions satisfy every
++# reference. bionic's libc.a is coarser -- the objects that *are* needed also
++# define these -- and the static link then fails with twenty duplicate symbols.
++#
++# Resolving it with --allow-multiple-definition is worse than not building:
++# link order puts the kernel first, so libc's internals end up calling the
++# kernel's memcpy and sem_init, and the binary segfaults before main().
++#
++# The string family is handled in arch/arm64/um/asm/string.h instead, by
++# declaring __HAVE_ARCH_* so lib/string.c does not compile its own -- renaming
++# those fights CONFIG_FORTIFY_SOURCE, which redefines them as macros.
++#
++# The rest are renamed, which is exactly what UML already does for
++# errno, sigprocmask, mktime and strrchr in arch/um/Makefile. These defines
++# reach kernel objects only, never USER_OBJS, so host-side code and libc keep
++# the real names. Compiler-emitted implicit calls (struct copies lowering to
++# memcpy) also keep the real name and get libc's implementation, which is
++# correct and usually faster than the kernel's generic C.
++#
++# The list is not guesswork and not the duplicate-symbol errors either. Those
++# only catch names both sides *define*; the dangerous case is a name libc
++# merely *references* while the kernel defines it, because then there is no
++# error at all -- the reference simply binds to the kernel's function. That is
++# what happened with sched_getaffinity: bionic's startup called it, got the
++# kernel's, and dereferenced a task_struct that does not exist yet. The symptom
++# was a SIGSEGV writing to 0x80 with no output.
++#
++# So the list is the intersection of "undefined in bionic's libc.a" with
++# "defined in vmlinux.a", computed with llvm-nm:
++#
++#   llvm-nm --undefined-only libc.a         | sort -u > A
++#   llvm-nm --defined-only --extern-only vmlinux.a | sort -u > B
++#   comm -12 A B
++#
++# Detected from the compiler rather than configured, because the whole
++# difference is which libc the target triple selects.
++UM_BIONIC := $(shell echo | $(CC) $(CLANG_FLAGS) -dM -E - 2>/dev/null | grep -c __ANDROID__)
++
++ifeq ($(UM_BIONIC),1)
++# Renamed on the object files at link time, not here: see
++# arch/arm64/um/bionic-syms.redef for the list and for why -D is the wrong tool.
++export UM_REDEF_SYMS := $(srctree)/arch/arm64/um/bionic-syms.redef
++endif
+--- a/arch/arm64/kernel/module-plts.c	2026-10-21 20:44:44
++++ b/arch/arm64/kernel/module-plts.c	2026-10-21 20:22:38
+@@ -10,6 +10,15 @@
+ #include <linux/moduleloader.h>
+ #include <linux/sort.h>
+ 
++/*
++ * get_plt_entry() and friends build veneers with aarch64_insn_gen_*(). Those
++ * are declared in <asm/insn.h>, which reaches this file only by way of
++ * <linux/ftrace.h> -> <asm/ftrace.h> on arm64. ARCH=um supplies its own
++ * asm/ftrace.h, so the declarations do not arrive and every encoder call
++ * becomes an implicit declaration. Include what is used.
++ */
++#include <asm/insn.h>
++
+ static struct plt_entry __get_adrp_add_pair(u64 dst, u64 pc,
+ 					    enum aarch64_insn_register reg)
+ {
+--- a/arch/arm64/lib/insn.c	2026-10-21 20:44:44
++++ b/arch/arm64/lib/insn.c	2026-10-21 20:22:38
+@@ -5,6 +5,7 @@
+  *
+  * Copyright (C) 2014-2016 Zi Shen Lim <zlim.lnx@gmail.com>
+  */
++#include <linux/align.h>
+ #include <linux/bitfield.h>
+ #include <linux/bitops.h>
+ #include <linux/bug.h>
+--- a/scripts/link-vmlinux.sh	2026-10-21 20:44:45
++++ b/scripts/link-vmlinux.sh	2026-10-21 20:22:45
+@@ -78,10 +78,97 @@
+ 	objs="${objs} init/version-timestamp.o"
+ 
+ 	if [ "${SRCARCH}" = "um" ]; then
++		# Rename the kernel symbols that the target libc also uses,
++		# before it gets a chance to bind to them. Doing it here rather
++		# than with -D during compilation keeps the preprocessor out of
++		# it: these names also occur as bare tokens that other headers
++		# paste into identifiers, and rewriting those breaks builds in
++		# places that have nothing to do with libc. See the list itself
++		# for which names and why.
++		#
++		# The list is derived here rather than only read from the file,
++		# because which names collide is a property of the libc being
++		# linked against and not of this tree. NDK r27c's bionic has no
++		# sched_setattr, newer ones do, so a build that worked shipped
++		# a link failure to anyone on a different NDK:
++		#
++		#	ld.lld: error: duplicate symbol: sched_setattr
++		#	ld.lld: error: duplicate symbol: sync_file_range
++		#
++		# Deriving it means a new libc adds a rename instead of a bug
++		# report. The checked-in file stays as the explanation and as
++		# the fallback when nm or libc.a cannot be found.
++		#
++		# Both halves matter and they fail differently. A name libc
++		# DEFINES is a duplicate-symbol error, loud and immediate. A
++		# name libc only REFERENCES silently binds to the kernel's
++		# definition -- that was sched_getaffinity, where bionic's
++		# startup called into the kernel's implementation and touched a
++		# task_struct that does not exist yet, for a SIGSEGV before
++		# main() with no output at all.
++		if [ -n "${UM_REDEF_SYMS}" ]; then
++			um_redef=.tmp_um_redef_syms
++			: > "${um_redef}"
++			if [ -f "${UM_REDEF_SYMS}" ]; then
++				sed -e 's/#.*//' -e '/^[[:space:]]*$/d' \
++					"${UM_REDEF_SYMS}" > "${um_redef}"
++			fi
++
++			um_libc=$(${CC} ${KBUILD_CFLAGS} -print-file-name=libc.a \
++				  2>/dev/null)
++			if [ -n "${NM}" ] && [ -f "${um_libc}" ]; then
++				# Anything the kernel defines...
++				${NM} --defined-only --extern-only \
++					${objs} ${libs} 2>/dev/null |
++					awk '$2 ~ /^[TWDBR]$/ { print $3 }' |
++					sort -u > .tmp_um_kdef
++				# ...that libc defines or references. Undefined
++				# entries print as "U name", defined ones as
++				# "addr T name"; archive member headers end in
++				# ':' and match neither.
++				${NM} "${um_libc}" 2>/dev/null |
++					awk '$1 == "U" { print $2 }
++					     $2 ~ /^[TWDBR]$/ { print $3 }' |
++					sort -u > .tmp_um_libc
++				comm -12 .tmp_um_kdef .tmp_um_libc |
++				while read -r sym; do
++					grep -q "^${sym}[[:space:]]" \
++						"${um_redef}" && continue
++					echo "${sym} kernel_${sym}"
++				done >> "${um_redef}"
++				rm -f .tmp_um_kdef .tmp_um_libc
++			fi
++
++			if [ -s "${um_redef}" ]; then
++				for a in ${objs} ${libs}; do
++					case "${a}" in
++					*.a|*.o)
++						${OBJCOPY} \
++						  --redefine-syms="${um_redef}" \
++						  "${a}" || exit 1
++						;;
++					esac
++				done
++			fi
++		fi
++
+ 		wl=-Wl,
+ 		ld="${CC}"
+ 		ldflags="${CFLAGS_vmlinux}"
+-		ldlibs="-lutil -lrt -lpthread"
++		# glibc keeps these in separate archives; bionic folds all
++		# three into libc, so -lutil, -lrt and -lpthread name libraries
++		# that do not exist and the link fails outright. Ask the
++		# compiler which of them can actually be linked rather than
++		# assuming a libc -- UML links with $(CC), so this is the same
++		# driver that will do the real link.
++		ldlibs=""
++		for lib in util rt pthread; do
++			if echo 'int main(void){return 0;}' | \
++			   ${CC} ${CFLAGS_vmlinux} -x c - -l${lib} \
++				 -o /dev/null >/dev/null 2>&1; then
++				ldlibs="${ldlibs} -l${lib}"
++			fi
++		done
+ 	else
+ 		wl=
+ 		ld="${LD}"

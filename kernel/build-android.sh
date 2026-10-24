@@ -39,8 +39,11 @@ TARGET_CC=$(command -v clang)
 "$HERE/fetch.sh"
 TREE="$HERE/src/linux-$KERNEL_VERSION"
 if [ ! -d "$TREE/arch/arm64/um" ]; then
-    echo "applying the arm64 UML subarch patch"
-    (cd "$TREE" && patch -p1 -f < "$HERE/patches/um-arm64.patch")
+    echo "applying the arm64 UML subarch patch series"
+    for patch_file in "$HERE"/patches/*.patch; do
+        echo "  $(basename "$patch_file")"
+        (cd "$TREE" && patch -p1 -f < "$patch_file")
+    done
     chmod +x "$TREE/arch/arm64/um/vdso/gen_vdso_offsets.sh"
     touch "$TREE/arch/arm64/um/vdso/gen_vdso_offsets.sh"
 fi

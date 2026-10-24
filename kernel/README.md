@@ -15,10 +15,14 @@ version string derived from the working tree.
 ## Architecture
 
 Upstream mainline implements `ARCH=um` under `arch/x86/um`. The pinned tree
-therefore boots on x86_64 out of the box. `patches/um-arm64.patch` adds the
-arm64 subarch used by Android devices; `build.sh` applies it once on an arm64
-host. The patch is part of this repository so the guest can be reproduced
-without a second source tree.
+therefore boots on x86_64 out of the box. `patches/0001..0016` adds the arm64
+subarch used by Android devices, one layer per patch: UML build plumbing,
+generic headers, shared headers, SKAS kernel core, trap and arch init, host OS
+adapter, host SKAS process control, then the arm64 subarch's kbuild and asm
+headers, sysdep headers, bionic symbol redefinitions, CPU and fault handling,
+ptrace, syscalls, signals and the vDSO. `build.sh` applies the series once, in
+filename order, on an arm64 host. The patches are part of this repository so
+the guest can be reproduced without a second source tree.
 
 The Rust engine does not assume either architecture: it probes the ELF header
 and validates it against the host at runtime.

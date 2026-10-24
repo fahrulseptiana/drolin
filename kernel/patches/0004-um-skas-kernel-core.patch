@@ -1,0 +1,639 @@
+diff -ruN linux-rc4-git/arch/um/kernel/Makefile /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/Makefile
+--- a/arch/um/kernel/Makefile	2026-10-21 20:44:44
++++ b/arch/um/kernel/Makefile	2026-10-21 20:22:39
+@@ -17,7 +17,7 @@
+ obj-y = config.o exec.o exitcode.o irq.o ksyms.o mem.o \
+ 	physmem.o process.o ptrace.o reboot.o sigio.o \
+ 	signal.o sysrq.o time.o tlb.o trap.o \
+-	um_arch.o umid.o kmsg_dump.o capflags.o skas/
++	um_arch.o umid.o kmsg_dump.o skas/
+ obj-y += load_file.o
+ 
+ obj-$(CONFIG_BLK_DEV_INITRD) += initrd.o
+@@ -31,7 +31,7 @@
+ 
+ include $(srctree)/arch/um/scripts/Makefile.rules
+ 
+-targets := config.c config.tmp capflags.c
++targets := config.c config.tmp
+ 
+ # Be careful with the below Sed code - sed is pitfall-rich!
+ # We use sed to lower build requirements, for "embedded" builders for instance.
+@@ -45,15 +45,6 @@
+ 
+ $(obj)/config.c: $(src)/config.c.in $(obj)/config.tmp FORCE
+ 	$(call if_changed,quote2)
+-
+-quiet_cmd_mkcapflags = MKCAP   $@
+-      cmd_mkcapflags = $(CONFIG_SHELL) $(src)/../../x86/kernel/cpu/mkcapflags.sh $@ $^
+-
+-cpufeature = $(src)/../../x86/include/asm/cpufeatures.h
+-vmxfeature = $(src)/../../x86/include/asm/vmxfeatures.h
+-
+-$(obj)/capflags.c: $(cpufeature) $(vmxfeature) $(src)/../../x86/kernel/cpu/mkcapflags.sh FORCE
+-	$(call if_changed,mkcapflags)
+ 
+ quiet_cmd_quote2 = QUOTE   $@
+       cmd_quote2 = sed -e '/CONFIG/{'          \
+diff -ruN linux-rc4-git/arch/um/kernel/asm-offsets.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/asm-offsets.c
+--- a/arch/um/kernel/asm-offsets.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/asm-offsets.c	2026-10-21 20:22:39
+@@ -9,7 +9,7 @@
+ #include <linux/fs.h>
+ #include <asm/mman.h>
+ #include <asm/seccomp.h>
+-#include <asm/extable.h>
++#include <sysdep/kernel-offsets.h>
+ 
+ /* workaround for a warning with -Wmissing-prototypes */
+ void foo(void);
+@@ -30,7 +30,7 @@
+ 	DEFINE(UM_NSEC_PER_SEC, NSEC_PER_SEC);
+ 	DEFINE(UM_NSEC_PER_USEC, NSEC_PER_USEC);
+ 
+-	DEFINE(UM_KERN_GDT_ENTRY_TLS_ENTRIES, GDT_ENTRY_TLS_ENTRIES);
++	ARCH_ASM_OFFSETS();
+ 
+ 	DEFINE(UM_SECCOMP_ARCH_NATIVE, SECCOMP_ARCH_NATIVE);
+ 
+@@ -43,7 +43,4 @@
+ 	DEFINE(HOSTFS_ATTR_CTIME, ATTR_CTIME);
+ 	DEFINE(HOSTFS_ATTR_ATIME_SET, ATTR_ATIME_SET);
+ 	DEFINE(HOSTFS_ATTR_MTIME_SET, ATTR_MTIME_SET);
+-
+-	DEFINE(ALT_INSTR_SIZE, sizeof(struct alt_instr));
+-	DEFINE(EXTABLE_SIZE,   sizeof(struct exception_table_entry));
+ }
+diff -ruN linux-rc4-git/arch/um/kernel/dyn.lds.S /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/dyn.lds.S
+--- a/arch/um/kernel/dyn.lds.S	2026-10-21 20:44:44
++++ b/arch/um/kernel/dyn.lds.S	2026-10-21 20:22:39
+@@ -18,7 +18,7 @@
+   . = START + SIZEOF_HEADERS;
+   .interp         : { *(.interp) }
+   __binary_start = .;
+-  . = ALIGN(4096);		/* Init code and data */
++  . = ALIGN((1 << CONFIG_PAGE_SHIFT));		/* Init code and data */
+   _text = .;
+   INIT_TEXT_SECTION(PAGE_SIZE)
+ 
+@@ -157,6 +157,16 @@
+   PROVIDE (edata = .);
+   .bss            : {
+    __bss_start = .;
++   /*
++    * Copy relocations land in .dynbss, and with an explicit linker script the
++    * linker places them at the current location rather than re-aligning for
++    * them. A libc whose exported data needs 8-byte alignment then fails to
++    * link: bionic's stderr is a pointer, and lld rejects the reference with
++    * "improper alignment for relocation R_AARCH64_LDST64_ABS_LO12_NC".
++    * glibc does not show this because UML has historically been linked
++    * statically against it here, and a static link has no copy relocations.
++    */
++   . = ALIGN(16);
+    *(.dynbss)
+    *(.bss .bss.* .gnu.linkonce.b.*)
+    *(COMMON)
+diff -ruN linux-rc4-git/arch/um/kernel/physmem.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/physmem.c
+--- a/arch/um/kernel/physmem.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/physmem.c	2026-10-21 20:22:39
+@@ -34,7 +34,7 @@
+ 		if (err == -ENOMEM)
+ 			printk(KERN_ERR "try increasing the host's "
+ 			       "/proc/sys/vm/max_map_count to <physical "
+-			       "memory size>/4096\n");
++			       "memory size>/%lu\n", PAGE_SIZE);
+ 		panic("map_memory(0x%lx, %d, 0x%llx, %ld, %d, %d, %d) failed, "
+ 		      "err = %d\n", virt, fd, offset, len, r, w, x, err);
+ 	}
+diff -ruN linux-rc4-git/arch/um/kernel/ptrace.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/ptrace.c
+--- a/arch/um/kernel/ptrace.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/ptrace.c	2026-10-21 20:22:39
+@@ -7,7 +7,6 @@
+ #include <linux/ptrace.h>
+ #include <linux/sched.h>
+ #include <linux/uaccess.h>
+-#include <asm/ptrace-abi.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/syscalls.h>
+@@ -91,6 +90,12 @@
+ 		break;
+ 	}
+ #endif
++#ifdef PTRACE_GET_THREAD_AREA
++	/*
++	 * Thread-area requests exist only where TLS lives in a descriptor table.
++	 * arm64 keeps it in TPIDR_EL0, which the guest writes itself, so these
++	 * requests have no arm64 encoding at all.
++	 */
+ 	case PTRACE_GET_THREAD_AREA:
+ 		ret = ptrace_get_thread_area(child, addr, vp);
+ 		break;
+@@ -98,6 +103,7 @@
+ 	case PTRACE_SET_THREAD_AREA:
+ 		ret = ptrace_set_thread_area(child, addr, vp);
+ 		break;
++#endif /* PTRACE_GET_THREAD_AREA */
+ 
+ 	default:
+ 		ret = ptrace_request(child, request, addr, data);
+diff -ruN linux-rc4-git/arch/um/kernel/skas/Makefile /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/skas/Makefile
+--- a/arch/um/kernel/skas/Makefile	2026-10-21 20:44:44
++++ b/arch/um/kernel/skas/Makefile	2026-10-21 20:22:39
+@@ -22,12 +22,31 @@
+ $(obj)/stub_exe: $(obj)/stub_exe.dbg FORCE
+ 	$(call if_changed,objcopy)
+ 
++# $(CLANG_FLAGS) supplies --target=, which selects both the code generation and
++# the linker emulation. KBUILD_CFLAGS does not carry it (it lives in
++# KBUILD_CPPFLAGS), so without this clang links the stub with the build
++# machine's default linker and it fails with "file in wrong format" as soon as
++# the host and target architectures differ. Empty under gcc.
++#
++# --no-rosegment below is an lld option, but clang's default linker is the
++# system ld: on a host whose default ld is GNU bfd (an Ubuntu GitHub runner,
++# for instance) the link dies with "unrecognized option '--no-rosegment'".
++# kbuild only adds -fuse-ld=lld to KBUILD_HOSTLDFLAGS, which this rule does not
++# use, so select lld here explicitly, and only when clang is the driver.
+ quiet_cmd_stub_exe = STUB_EXE $@
+-      cmd_stub_exe = $(CC) -nostdlib -o $@ \
++      cmd_stub_exe = $(CC) -nostdlib -o $@ $(filter --target=%,$(CLANG_FLAGS)) \
++			   $(if $(filter --target=%,$(CLANG_FLAGS)),-fuse-ld=lld) \
+ 			   $(filter-out $(UM_GPROF_OPT) $(UM_GCOV_OPT),$(KBUILD_CFLAGS)) $(STUB_EXE_LDFLAGS) \
+ 			   $(filter %.o,$^)
+ 
+-STUB_EXE_LDFLAGS = -Wl,-n -static
++# --no-rosegment: lld gives read-only data its own PT_LOAD, and with -n
++# (nmagic, no page alignment) the two segments end up sharing a page. The
++# kernel maps ET_EXEC segments with MAP_FIXED_NOREPLACE, so the second mmap of
++# that page returns -EEXIST and the exec fails after the point of no return --
++# which surfaces as the *guest* failing to start with -ENOMEM, because
++# start_userspace() cannot exec the stub. Merging rodata into the text segment
++# leaves one loadable segment, which is what -n was written for.
++STUB_EXE_LDFLAGS = -Wl,-n -Wl,--no-rosegment -static
+ 
+ targets += stub_exe.dbg stub_exe $(stub_exe_objs-y)
+ 
+diff -ruN linux-rc4-git/arch/um/kernel/skas/mmu.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/skas/mmu.c
+--- a/arch/um/kernel/skas/mmu.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/skas/mmu.c	2026-10-21 20:22:39
+@@ -49,9 +49,19 @@
+ 	mutex_init(&mm->context.turnstile);
+ 	spin_lock_init(&mm->context.sync_tlb_lock);
+ 
++	/*
++	 * Fault-around detector starts cold: prefault_level is used as an
++	 * array index in trap.c, so it must never be garbage.
++	 */
++	mm->context.prefault_next = 0;
++	mm->context.prefault_level = 0;
++
+ 	stack = __get_free_pages(GFP_KERNEL | __GFP_ZERO, ilog2(STUB_DATA_PAGES));
+-	if (stack == 0)
++	if (stack == 0) {
++		printk(KERN_ERR "%s: failed to allocate %d stub data pages\n",
++		       __func__, STUB_DATA_PAGES);
+ 		goto out;
++	}
+ 
+ 	new_id->stack = stack;
+ 	new_id->syscall_data_len = 0;
+@@ -63,8 +73,11 @@
+ 	}
+ 
+ 	ret = start_userspace(new_id);
+-	if (ret < 0)
++	if (ret < 0) {
++		printk(KERN_ERR "%s: start_userspace failed: %d\n",
++		       __func__, ret);
+ 		goto out_free;
++	}
+ 
+ 	/* Ensure the new MM is clean and nothing unwanted is mapped */
+ 	unmap(new_id, 0, STUB_START);
+@@ -72,11 +85,52 @@
+ 	return 0;
+ 
+  out_free:
++	/*
++	 * The mm is about to be freed by the caller, and mm_init()'s failure path
++	 * does not call destroy_context() -- so this list_del has no counterpart.
++	 * Without it mm_list keeps a pointer into freed memory and the next walk of
++	 * it, mm_sigchld_irq() on any stub dying, reads it: an ENOMEM while starting
++	 * a stub becomes a use-after-free somewhere else.
++	 */
++	scoped_guard(spinlock_irqsave, &mm_list_lock)
++		list_del(&mm->context.list);
+ 	free_pages(new_id->stack, ilog2(STUB_DATA_PAGES));
+  out:
+ 	return ret;
+ }
+ 
++/*
++ * A stub that has been killed but not yet reaped, and the resources that
++ * cannot be released until the host says it is gone. destroy_context() cannot
++ * keep a pointer into mm->context for this: the mm_struct is freed as soon as
++ * it returns, so the few fields that matter are copied out.
++ */
++struct dying_stub {
++	struct list_head list;
++	int pid;
++	unsigned long stack;
++	int sock;
++};
++
++static LIST_HEAD(dying_stubs);
++
++/* Release what destroy_context() deferred, now that @pid is confirmed dead. */
++static void reap_dying_stub(pid_t pid)
++{
++	struct dying_stub *d, *tmp;
++
++	list_for_each_entry_safe(d, tmp, &dying_stubs, list) {
++		if (d->pid != pid)
++			continue;
++		list_del(&d->list);
++		if (d->sock)
++			os_close_file(d->sock);
++		free_pages(d->stack, ilog2(STUB_DATA_PAGES));
++		kfree(d);
++		return;
++	}
++}
++
+ void destroy_context(struct mm_struct *mm)
+ {
+ 	struct mm_context *mmu = &mm->context;
+@@ -98,6 +152,42 @@
+ 	scoped_guard(spinlock_irqsave, &mm_list_lock)
+ 		list_del(&mm->context.list);
+ 
++	/*
++	 * Killing a stub is cheap; waiting for it to die is not, and this path
++	 * runs twice for every guest execve. os_kill_ptraced_process() with
++	 * reap_child set blocks in waitpid() with signals off, so the whole
++	 * kernel stops for as long as the host takes to reap: measured on a
++	 * Galaxy S26 at 54.5-55.0us, and flat at 0, 32, 128 and 512 mappings,
++	 * so it is the reap latency itself rather than any work being done.
++	 *
++	 * The wait is not gratuitous, though, which is why this is not simply
++	 * dropped: the free_pages() below hands back the page the stub shares
++	 * with us, and doing that while the stub is still alive is a
++	 * use-after-free on the other side.
++	 *
++	 * So keep the ordering and lose the wait: hand the pid and its pages to
++	 * the SIGCHLD reaper, which already runs and already knows how to
++	 * collect dead stubs, and let it free them once the host confirms the
++	 * process is gone. In ptrace mode there is no SIGCHLD handler
++	 * registered at all (see arch/um/os-Linux/signal.c), so there is nobody
++	 * to hand to and the synchronous path stays.
++	 */
++	if (mmu->id.pid > 0 && using_seccomp) {
++		struct dying_stub *d = kmalloc(sizeof(*d), GFP_ATOMIC);
++
++		if (d) {
++			d->pid = mmu->id.pid;
++			d->stack = mmu->id.stack;
++			d->sock = mmu->id.sock;
++			scoped_guard(spinlock_irqsave, &mm_list_lock)
++				list_add(&d->list, &dying_stubs);
++			os_kill_ptraced_process(mmu->id.pid, 0);
++			mmu->id.pid = -1;
++			return;
++		}
++		/* Out of memory: do it the slow, safe way below instead. */
++	}
++
+ 	if (mmu->id.pid > 0) {
+ 		os_kill_ptraced_process(mmu->id.pid, 1);
+ 		mmu->id.pid = -1;
+@@ -118,6 +208,14 @@
+ 
+ 	while ((pid = os_reap_child()) > 0) {
+ 		/*
++		 * Most reaped children are stubs destroy_context() killed and
++		 * handed over rather than waited for. Release those first; the
++		 * search below is for a stub that died without being asked to,
++		 * and a handed-over one is no longer on mm_list to be found.
++		 */
++		reap_dying_stub(pid);
++
++		/*
+ 		* A child died, check if we have an MM with the PID. This is
+ 		* only relevant in SECCOMP mode (as ptrace will fail anyway).
+ 		*
+@@ -133,9 +231,24 @@
+ 
+ 				stub_data = (void *)mm_context->id.stack;
+ 				stub_data->futex = FUTEX_IN_KERN;
+-#if IS_ENABLED(CONFIG_SMP)
++				/*
++				 * Unconditional on purpose -- the waiter-bit
++				 * wake elision must never be used on this
++				 * path. The waiter can be anywhere between
++				 * spinning and parking, and a dead stub will
++				 * never issue another handoff to correct a
++				 * skipped wake: a spurious FUTEX_WAKE here is
++				 * noise, a missed one is a task hung forever.
++				 * The plain store can race with the waiter's
++				 * fetch_or of its waiter bit; that is fine,
++				 * because FUTEX_WAIT revalidates the value it
++				 * was passed and this wake always fires. The
++				 * syscall also carries the barrier the plain
++				 * store lacks. (This was SMP-only before the
++				 * spin existed; now the wake is the one kick
++				 * that works no matter where the waiter is.)
++				 */
+ 				os_futex_wake(&stub_data->futex);
+-#endif
+ 
+ 				/*
+ 				 * NOTE: Currently executing syscalls by
+@@ -152,6 +265,20 @@
+ static int __init init_child_tracking(void)
+ {
+ 	int err;
++
++	/*
++	 * The handoff word must own its cacheline outright: both sides poll
++	 * it, and a field the peer writes sharing the line would turn the
++	 * spin in stub-futex.h into a stream of coherence misses. Assert the
++	 * layout so a reorder of struct stub_data cannot quietly regress
++	 * this -- it would still be correct, just slow in a way nothing
++	 * functional would ever catch.
++	 */
++	BUILD_BUG_ON(offsetof(struct stub_data, futex) % STUB_FUTEX_ALIGN != 0);
++	BUILD_BUG_ON(offsetofend(struct stub_data, syscall_data_len) >
++		     offsetof(struct stub_data, futex));
++	BUILD_BUG_ON(offsetof(struct stub_data, syscall_data) <
++		     offsetof(struct stub_data, futex) + STUB_FUTEX_ALIGN);
+ 
+ 	spin_lock_init(&mm_list_lock);
+ 	INIT_LIST_HEAD(&mm_list);
+diff -ruN linux-rc4-git/arch/um/kernel/skas/stub.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/skas/stub.c
+--- a/arch/um/kernel/skas/stub.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/skas/stub.c	2026-10-21 20:22:39
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <sysdep/stub.h>
++#include <stub-futex.h>
+ 
+ #include <linux/futex.h>
+ #include <sys/socket.h>
+@@ -112,26 +113,71 @@
+ 	struct cmsghdr *fd_msg;
+ 	int *fd_map;
+ 	int num_fds;
++	unsigned long budget;
++	unsigned int futex_val;
+ 	long res;
+ 
+ 	d->signal = sig;
+ 	d->si_offset = (unsigned long)info - (unsigned long)&d->sigstack[0];
+ 	d->mctx_offset = (unsigned long)&uc->uc_mcontext - (unsigned long)&d->sigstack[0];
+ 
++	/* Capture arch state that is not part of the mcontext */
++	stub_seccomp_save_state(&d->arch_data);
++
+ restart_wait:
+-	d->futex = FUTEX_IN_KERN;
+-	do {
+-		res = stub_syscall3(__NR_futex, (unsigned long)&d->futex,
+-				    FUTEX_WAKE, 1);
+-	} while (res == -EINTR);
++	/*
++	 * Hand the word to the kernel. The exchange's release ordering
++	 * publishes everything written above (signal, offsets, arch state)
++	 * before the kernel can observe the flip, and its return value says
++	 * whether the kernel actually parked -- only then does FUTEX_WAKE buy
++	 * anything. When the kernel-side spin caught the flip, the wake it
++	 * elides here is the syscall plus the voluntary context switch that
++	 * dominates the measured handoff cost.
++	 */
++	if (stub_futex_hand_over(&d->futex, FUTEX_IN_KERN)) {
++		do {
++			res = stub_syscall3(__NR_futex, (unsigned long)&d->futex,
++					    FUTEX_WAKE, 1);
++		} while (res == -EINTR);
++	}
+ 
+-	do {
+-		res = stub_syscall4(__NR_futex, (unsigned long)&d->futex,
+-				    FUTEX_WAIT, FUTEX_IN_KERN, 0);
+-	} while (res == -EINTR || d->futex == FUTEX_IN_KERN);
++	/*
++	 * Wait for the kernel's reply: spin within the budget first, so a fast
++	 * reply is observed without ever entering FUTEX_WAIT.
++	 */
++	budget = stub_futex_spin_budget(&d->stub_spin, d->spin_ticks);
++	futex_val = stub_futex_spin(&d->futex, FUTEX_IN_KERN, budget);
++	if (budget)
++		stub_futex_spin_result(&d->stub_spin,
++				       STUB_FUTEX_OWNER(futex_val) == FUTEX_IN_CHILD);
+ 
+-	if (res < 0 && res != -EAGAIN)
+-		stub_syscall1(__NR_exit_group, 1);
++	if (STUB_FUTEX_OWNER(futex_val) == FUTEX_IN_KERN) {
++		/*
++		 * Going to sleep: advertise it, so the kernel's handoff knows
++		 * a wake is needed. If the reply slipped in between the spin
++		 * and this fetch_or, the returned old value shows the flip
++		 * and the wait is skipped entirely.
++		 */
++		futex_val = stub_futex_fetch_or(&d->futex, STUB_FUTEX_WAITER) |
++			STUB_FUTEX_WAITER;
++
++		while (STUB_FUTEX_OWNER(futex_val) == FUTEX_IN_KERN) {
++			/*
++			 * The expected value passed to FUTEX_WAIT is the one
++			 * just observed, re-read after the fetch_or and after
++			 * every wakeup. This is what makes a wake landing
++			 * between the spin and the wait impossible to lose:
++			 * if the word changed since the read, FUTEX_WAIT
++			 * refuses with EAGAIN instead of sleeping through it.
++			 */
++			res = stub_syscall4(__NR_futex, (unsigned long)&d->futex,
++					    FUTEX_WAIT, futex_val, 0);
++			if (res < 0 && res != -EINTR && res != -EAGAIN)
++				stub_syscall1(__NR_exit_group, 1);
++
++			futex_val = stub_futex_load_acquire(&d->futex);
++		}
++	}
+ 
+ 	if (d->syscall_data_len) {
+ 		/* Read passed FDs (if any) */
+diff -ruN linux-rc4-git/arch/um/kernel/skas/stub_exe.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/skas/stub_exe.c
+--- a/arch/um/kernel/skas/stub_exe.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/skas/stub_exe.c	2026-10-21 20:22:39
+@@ -40,6 +40,12 @@
+ 	/* Needed in SECCOMP mode (and safe to do anyway) */
+ 	stub_syscall5(__NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+ 
++	/*
++	 * Whatever this architecture has to settle in a fresh stub, before the
++	 * seccomp filter is installed and so still able to make any syscall.
++	 */
++	stub_arch_init();
++
+ 	/* read information from STDIN and close it */
+ 	res = stub_syscall3(__NR_read, 0,
+ 			    (unsigned long)&init_data, sizeof(init_data));
+@@ -143,11 +149,25 @@
+ 			BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+ 				 (offsetof(struct seccomp_data, instruction_pointer))),
+ 
+-			/* [3] Mask out lower bits */
+-			BPF_STMT(BPF_ALU | BPF_AND | BPF_K, 0xfffff000),
++			/*
++			 * [3] Mask out lower bits.
++			 *
++			 * This was 0xfffff000, i.e. a hardcoded 4K page. The
++			 * filter is checking whether the trapping instruction
++			 * pointer lies on the stub's code page, so the mask has
++			 * to be the *host's* page mask -- on a 16K-page host
++			 * (Android 15 and later) a 4K mask would compare
++			 * against the wrong page and reject legitimate stub
++			 * syscalls. BPF_K is 32-bit and so is seccomp_data's
++			 * view here, hence the cast.
++			 */
++			BPF_STMT(BPF_ALU | BPF_AND | BPF_K,
++				 (unsigned int)UM_KERN_PAGE_MASK),
+ 
+ 			/* [4] Jump to [6] if the lower bits are not on the expected page */
+-			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (init_data.stub_start) & 0xfffff000, 1, 0),
++			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
++				 (init_data.stub_start) & (unsigned int)UM_KERN_PAGE_MASK,
++				 1, 0),
+ 
+ 			/* [5] Trap call, allow */
+ 			BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+@@ -176,13 +196,19 @@
+ 				 4, 0),
+ 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_munmap,
+ 				 3, 0),
+-#ifdef __i386__
+-			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_set_thread_area,
++			/*
++			 * The syscall the stub needs in order to reinstate
++			 * guest TLS, which is architecture-specific:
++			 * set_thread_area on i386, arch_prctl on x86-64, and
++			 * nothing at all on arm64, where TPIDR_EL0 is written
++			 * directly by the stub. STUB_SECCOMP_TLS_SYSCALL is -1
++			 * in that case, which no real syscall number can match,
++			 * so the slot is inert while every jump offset below
++			 * stays as it is.
++			 */
++			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
++				 (unsigned int)STUB_SECCOMP_TLS_SYSCALL,
+ 				 2, 0),
+-#else
+-			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_arch_prctl,
+-				 2, 0),
+-#endif
+ 			BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_rt_sigreturn,
+ 				 1, 0),
+ 
+diff -ruN linux-rc4-git/arch/um/kernel/skas/syscall.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/skas/syscall.c
+--- a/arch/um/kernel/skas/syscall.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/skas/syscall.c	2026-10-21 20:22:39
+@@ -14,6 +14,18 @@
+ #include <asm/unistd.h>
+ #include <asm/delay.h>
+ 
++/*
++ * Seed the return register with -ENOSYS before the syscall-entry stop.
++ *
++ * Unconditional unless a subarch says otherwise, which preserves the x86
++ * behaviour: there the return register is not an argument register and native
++ * x86 genuinely leaves -ENOSYS in it at an entry stop. See the arm64 override
++ * in <sysdep/ptrace.h> for why that is wrong when the two alias.
++ */
++#ifndef UM_SEED_ENOSYS_BEFORE_TRACE
++#define UM_SEED_ENOSYS_BEFORE_TRACE(r)	1
++#endif
++
+ void handle_syscall(struct uml_pt_regs *r)
+ {
+ 	struct pt_regs *regs = container_of(r, struct pt_regs, regs);
+@@ -21,10 +33,21 @@
+ 
+ 	/* Initialize the syscall number and default return value. */
+ 	UPT_SYSCALL_NR(r) = PT_SYSCALL_NR(r->gp);
+-	PT_REGS_SET_SYSCALL_RETURN(regs, -ENOSYS);
++	if (UM_SEED_ENOSYS_BEFORE_TRACE(r))
++		PT_REGS_SET_SYSCALL_RETURN(regs, -ENOSYS);
+ 
+-	if (syscall_trace_enter(regs))
++
++	if (syscall_trace_enter(regs)) {
++		/*
++		 * The tracer cancelled the call. Leave the return register
++		 * alone: a tracer that skips a syscall is expected to have set
++		 * the value it wants userspace to see, and on architectures
++		 * where that register is also an argument register, clobbering
++		 * it here would destroy an argument the tracer may have just
++		 * written.
++		 */
+ 		goto out;
++	}
+ 
+ 	/* Do the seccomp check after ptrace; failures should be fast. */
+ 	if (secure_computing() == -1)
+diff -ruN linux-rc4-git/arch/um/kernel/smp.c /Users/irul/Kitchen/linux-um-arm64/arch/um/kernel/smp.c
+--- a/arch/um/kernel/smp.c	2026-10-21 20:44:44
++++ b/arch/um/kernel/smp.c	2026-10-21 20:22:39
+@@ -205,8 +205,50 @@
+ {
+ }
+ 
+-/* Set in uml_ncpus_setup */
+-int uml_ncpus = 1;
++/*
++ * Set by ncpus= if given, otherwise by um_ncpus_init() from the host's CPU
++ * count. Zero means "nobody has decided yet", which is why the default is not
++ * simply written here.
++ */
++int uml_ncpus;
++
++/*
++ * Choose a CPU count when the command line did not.
++ *
++ * One less than the host has, because UML's CPUs are host threads and they are
++ * not the only threads it runs: the kernel thread and the stub processes need
++ * to be scheduled too, so asking for exactly as many CPUs as the host has
++ * oversubscribes it and the guest's own threads start evicting each other.
++ *
++ * Measured on a Raspberry Pi 5 (4x Cortex-A76, 16K pages, guest built from this
++ * tree), parallel compile in the guest, medians of 3 rounds, milliseconds:
++ *
++ *	ncpus=	1	2	3	4
++ *	make -jN	3000	1717	1483	1587
++ *	make -j1	2969	2928	2977	3002
++ *
++ * -- so three CPUs beat four on a four-CPU host, and the flat -j1 column is the
++ * control saying the machine did not move under the measurement. Defaulting to
++ * 1, as this did, left all of that unclaimed unless the operator knew the
++ * option existed.
++ *
++ * A host that only supports ptrace userspace cannot run more than one CPU
++ * thread; start_up.c clamps this back to 1 there, with a message, rather than
++ * refusing to boot.
++ */
++void __init um_ncpus_init(void)
++{
++	int host;
++
++	if (uml_ncpus)		/* ncpus= was given; the operator decides */
++		return;
++
++	host = os_nr_cpus_online();
++	uml_ncpus = clamp(host - 1, 1, NR_CPUS);
++
++	os_info("Using %d CPUs of the host's %d (ncpus= to override)\n",
++		uml_ncpus, host);
++}
+ 
+ void __init prefill_possible_map(void)
+ {

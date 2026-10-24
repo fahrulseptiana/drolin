@@ -80,8 +80,9 @@ console detail, not a UML policy, so it lives in `drolin-runtime`.
 
 `kernel/latest-stable.env` pins the source version and SHA-256. `fetch.sh`
 verifies the tarball and extracts it. `build.sh` builds for the host with
-`ARCH=um`; on arm64 it applies `patches/um-arm64.patch` once. `build-android.sh`
-compiles statically against the NDK sysroot and bionic for an app.
+`ARCH=um`; on arm64 it applies `patches/0001..0016` once, in filename order.
+`build-android.sh` compiles statically against the NDK sysroot and bionic for an
+app.
 
 Bionic is required for the app. A glibc kernel is a valid `adb shell` binary but
 dies under zygote's seccomp filter, and Android has no glibc loader.

@@ -1,0 +1,429 @@
+diff -ruN linux-rc4-git/arch/arm64/um/asm/processor.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/processor.h
+--- a/arch/arm64/um/asm/processor.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/processor.h	2026-10-21 20:22:38
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_ARM64_PROCESSOR_H
++#define __UM_ARM64_PROCESSOR_H
++
++#include <linux/time-internal.h>
++
++/* include faultinfo structure */
++#include <sysdep/faultinfo.h>
++
++struct arch_thread {
++	/*
++	 * Guest TLS (TPIDR_EL0). arm64 userspace owns this register outright,
++	 * so UML only has to remember it across a switch between guest threads
++	 * sharing one stub process.
++	 */
++	unsigned long tp_value;
++	struct faultinfo faultinfo;
++};
++
++#define INIT_ARCH_THREAD {			\
++	.tp_value	= 0,			\
++	.faultinfo	= { 0, 0, 0 }		\
++}
++
++#define STACKSLOTS_PER_LINE 4
++
++static inline void arch_flush_thread(struct arch_thread *thread)
++{
++	thread->tp_value = 0;
++}
++
++static inline void arch_copy_thread(struct arch_thread *from,
++				    struct arch_thread *to)
++{
++	to->tp_value = from->tp_value;
++}
++
++#define current_sp()						\
++	({ void *sp; __asm__("mov %0, sp" : "=r" (sp)); sp; })
++#define current_bp()						\
++	({ unsigned long bp; __asm__("mov %0, x29" : "=r" (bp)); bp; })
++
++#define KSTK_EIP(tsk) KSTK_REG(tsk, HOST_PC)
++#define KSTK_ESP(tsk) KSTK_REG(tsk, HOST_SP)
++#define KSTK_EBP(tsk) KSTK_REG(tsk, HOST_X29)
++
++#define ARCH_IS_STACKGROW(address) \
++	(address + 65536 + 32 * sizeof(unsigned long) >= UPT_SP(&current->thread.regs.regs))
++
++/*
++ * x86 emits PAUSE here. The aarch64 equivalent is YIELD, a hint that costs
++ * nothing on cores that ignore it and lets an SMT core give up its slot.
++ */
++static __always_inline void native_pause(void)
++{
++	__asm__ __volatile__("yield" ::: "memory");
++}
++
++static __always_inline void cpu_relax(void)
++{
++	if (time_travel_mode == TT_MODE_INFCPU ||
++	    time_travel_mode == TT_MODE_EXTERNAL)
++		time_travel_ndelay(1);
++	else
++		native_pause();
++}
++
++#define task_pt_regs(t) (&(t)->thread.regs)
++
++#include <asm/processor-generic.h>
++
++#endif /* __UM_ARM64_PROCESSOR_H */
+diff -ruN linux-rc4-git/arch/arm64/um/asm/ptrace.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/ptrace.h
+--- a/arch/arm64/um/asm/ptrace.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/ptrace.h	2026-10-21 20:22:38
+@@ -0,0 +1,104 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_ARM64_PTRACE_H
++#define __UM_ARM64_PTRACE_H
++
++/*
++ * Regsets the UML core dump / ptrace glue knows about. arm64's real regset list
++ * is much longer (SVE, SME, PAC keys, MTE, GCS...), but a UML guest has none of
++ * those: it is a userspace process whose FP state is whatever the host gave the
++ * stub. Only the two that exist for every aarch64 process are exposed.
++ */
++enum {
++	REGSET_GENERAL,
++	REGSET_FP,
++	REGSET_SYSTEM_CALL,
++};
++
++#include <linux/compiler.h>
++#include <uapi/asm/ptrace.h>
++#include <asm/ptrace-generic.h>
++
++#define user_mode(r) UPT_IS_USER(&(r)->regs)
++
++#define PT_REGS_X(r, n)	UPT_X(&(r)->regs, n)
++#define PT_REGS_SP_REG(r) UPT_SP(&(r)->regs)
++#define PT_REGS_PSTATE(r) UPT_PSTATE(&(r)->regs)
++
++#define PT_REGS_X0(r)	PT_REGS_X(r, HOST_X0)
++#define PT_REGS_X1(r)	PT_REGS_X(r, HOST_X1)
++#define PT_REGS_X2(r)	PT_REGS_X(r, HOST_X2)
++#define PT_REGS_X3(r)	PT_REGS_X(r, HOST_X3)
++#define PT_REGS_X4(r)	PT_REGS_X(r, HOST_X4)
++#define PT_REGS_X5(r)	PT_REGS_X(r, HOST_X5)
++#define PT_REGS_X6(r)	PT_REGS_X(r, HOST_X6)
++#define PT_REGS_X7(r)	PT_REGS_X(r, HOST_X7)
++#define PT_REGS_X8(r)	PT_REGS_X(r, HOST_X8)
++#define PT_REGS_X29(r)	PT_REGS_X(r, HOST_X29)
++#define PT_REGS_X30(r)	PT_REGS_X(r, HOST_X30)
++
++/* Frame pointer, for the generic KSTK_EBP/backtrace glue. */
++#define PT_REGS_BP(r)	PT_REGS_X29(r)
++
++/*
++ * The syscall return value is x0.
++ *
++ * PT_REGS_ORIG_SYSCALL is NOT x0. On x86 the two alias because RAX carries both
++ * the syscall number in and the result out, so arch/um/kernel/signal.c can write
++ * "PT_REGS_ORIG_SYSCALL(regs) = __NR_restart_syscall" and mean it. On arm64 the
++ * number and the result live in different registers, so aliasing them would make
++ * that assignment clobber the return value instead of redirecting the syscall.
++ * It maps to the synthesised HOST_SYSCALL_NR slot, which is also what the
++ * ptrace and seccomp resume paths write back to the host.
++ */
++#define PT_REGS_SYSCALL_RET(r)	PT_REGS_X0(r)
++#define PT_REGS_ORIG_SYSCALL(r)	PT_REGS_X(r, HOST_SYSCALL_NR)
++
++#define PT_REGS_SET_SYSCALL_RETURN(r, res) (PT_REGS_X0(r) = (res))
++
++/*
++ * Bits of PSTATE that a debugger (or a sigreturn frame) may set, mirroring
++ * valid_native_regs() in arch/arm64/kernel/ptrace.c. Anything outside this
++ * either names an exception level the guest cannot be at or masks interrupts it
++ * does not own; the host would sanitise it on PTRACE_SETREGSET regardless, so
++ * filtering here keeps the guest's own view consistent with what will actually
++ * be installed.
++ */
++#define UM_PSTATE_WRITABLE						\
++	(PSR_N_BIT | PSR_Z_BIT | PSR_C_BIT | PSR_V_BIT |		\
++	 PSR_SSBS_BIT | PSR_DIT_BIT | PSR_TCO_BIT)
++
++#define PT_FIX_EXEC_STACK(sp) do ; while (0)
++
++#define profile_pc(regs) PT_REGS_IP(regs)
++
++static inline long regs_return_value(struct pt_regs *regs)
++{
++	return PT_REGS_X0(regs);
++}
++
++#define user_stack_pointer(regs) PT_REGS_SP(regs)
++
++/*
++ * arm64 has no LDT and no set_thread_area(2); TLS is TPIDR_EL0, handled through
++ * arch_set_tls(). These exist only because arch/um/kernel/ptrace.c references
++ * them unconditionally.
++ */
++struct user_desc;
++
++#include <asm/errno.h>
++
++static inline int ptrace_get_thread_area(struct task_struct *child, int idx,
++					 struct user_desc __user *user_desc)
++{
++	return -ENOSYS;
++}
++
++static inline int ptrace_set_thread_area(struct task_struct *child, int idx,
++					 struct user_desc __user *user_desc)
++{
++	return -ENOSYS;
++}
++
++extern void arch_switch_to(struct task_struct *to);
++
++#endif /* __UM_ARM64_PTRACE_H */
+diff -ruN linux-rc4-git/arch/arm64/um/asm/rqspinlock.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/rqspinlock.h
+--- a/arch/arm64/um/asm/rqspinlock.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/rqspinlock.h	2026-10-21 20:22:38
+@@ -0,0 +1,30 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_UM_ARM64_RQSPINLOCK_H_
++#define _ASM_UM_ARM64_RQSPINLOCK_H_
++
++/*
++ * Take the generic resilient queued spinlock, not arm64's.
++ *
++ * arch/arm64/include/asm/rqspinlock.h builds res_smp_cond_load_acquire() on
++ * smp_cond_load_acquire_timewait(), which waits in WFE and therefore has to ask
++ * arch_timer_evtstrm_available() whether the architected timer's event stream
++ * is running to wake it. Neither exists here: a UML guest is an ordinary
++ * userspace process with no architected timer of its own, and the symbol is not
++ * merely missing but meaningless.
++ *
++ * Without this the build breaks the moment SMP and BPF are both on, which is
++ * the ordinary configuration for running containers:
++ *
++ *	arch/arm64/include/asm/rqspinlock.h:72:14: error: call to undeclared
++ *	function 'arch_timer_evtstrm_available'
++ *	  int __wfe = arch_timer_evtstrm_available();
++ *
++ * Defining nothing is the fix rather than a workaround: kernel/bpf/rqspinlock.c
++ * guards the macro with #ifndef and falls back to plain smp_cond_load_acquire,
++ * which is correct on any architecture and is what a guest wants anyway --
++ * spinning in the guest is spinning in a host thread, and the host scheduler,
++ * not an event stream, is what eventually runs the lock holder.
++ */
++#include <asm-generic/rqspinlock.h>
++
++#endif
+diff -ruN linux-rc4-git/arch/arm64/um/asm/rwonce.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/rwonce.h
+--- a/arch/arm64/um/asm/rwonce.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/rwonce.h	2026-10-21 20:22:38
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_ARM64_RWONCE_H
++#define __UM_ARM64_RWONCE_H
++
++/*
++ * arch/arm64/include/asm/rwonce.h exists to give LTO builds a load-acquire
++ * READ_ONCE() via alternatives patching, which drags in asm/cpucaps.h,
++ * asm/alternative-macros.h and the whole EL1 cpufeature machinery. A UML guest
++ * is an ordinary userspace process with no alternatives patching and no system
++ * registers, so the generic definitions are both correct and the only ones that
++ * can compile here.
++ */
++#include <asm-generic/rwonce.h>
++
++#endif
+diff -ruN linux-rc4-git/arch/arm64/um/asm/signal.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/signal.h
+--- a/arch/arm64/um/asm/signal.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/signal.h	2026-10-21 20:22:38
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_ARM64_SIGNAL_H
++#define __UM_ARM64_SIGNAL_H
++
++/*
++ * arch/arm64/include/asm/signal.h exists solely to define
++ * arch_untagged_si_addr(), which strips address tags from si_addr for TBI and
++ * MTE. It reaches that through <asm/memory.h>, i.e. the whole EL1 virtual
++ * memory layout.
++ *
++ * A UML guest has neither TBI nor MTE: the guest's "hardware" is the host
++ * process, UML does not implement tagged pointers, and si_addr values reaching
++ * the guest have already been untagged (if at all) by the host. So there is
++ * nothing to strip, and the generic behaviour of leaving si_addr alone is
++ * correct.
++ */
++#include <uapi/asm/signal.h>
++#include <uapi/asm/siginfo.h>
++
++#endif /* __UM_ARM64_SIGNAL_H */
+diff -ruN linux-rc4-git/arch/arm64/um/asm/simd.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/simd.h
+--- a/arch/arm64/um/asm/simd.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/simd.h	2026-10-21 20:22:38
+@@ -0,0 +1,28 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Kernel-mode SIMD for ARCH=um SUBARCH=arm64: not available.
++ *
++ * On hardware, may_use_simd() reports whether the kernel may currently use the
++ * FPSIMD/NEON registers, which is safe at EL1 only because arch/arm64 saves and
++ * restores the interrupted context's FP state around it (kernel_neon_begin/end).
++ *
++ * A UML guest kernel has no such mechanism: it runs inside a userspace process
++ * and shares one FPSIMD register file with the guest userspace it is servicing.
++ * Using NEON in guest kernel code would silently corrupt the registers of
++ * whatever guest thread happened to be running -- which is precisely the class
++ * of bug the FP/SIMD torture gate exists to catch.
++ *
++ * Reporting "no" makes every crypto driver and library that offers a SIMD
++ * implementation fall back to its generic C one, which is the correct and only
++ * safe answer here.
++ *
++ * This also keeps <asm/simd.h> from resolving to arch/arm64's, which reaches
++ * asm/neon.h, asm/fpsimd.h and finally the generated asm/sysreg-defs.h that is
++ * not built for ARCH=um.
++ */
++#ifndef __UM_ARM64_SIMD_H
++#define __UM_ARM64_SIMD_H
++
++#include <asm-generic/simd.h>
++
++#endif /* __UM_ARM64_SIMD_H */
+diff -ruN linux-rc4-git/arch/arm64/um/asm/string.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/string.h
+--- a/arch/arm64/um/asm/string.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/string.h	2026-10-21 20:22:38
+@@ -0,0 +1,69 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_ARM64_STRING_H
++#define __UM_ARM64_STRING_H
++
++/*
++ * arch/arm64/include/asm/string.h declares hand-written assembly versions of
++ * strrchr, strchr, strcmp, memcpy and friends, implemented in arch/arm64/lib.
++ * Those are kernel-only routines and arch/arm64/lib is not built for ARCH=um,
++ * so declaring __HAVE_ARCH_* here would suppress lib/string.c's generic C
++ * versions and leave the symbols undefined at link time.
++ *
++ * Defining no __HAVE_ARCH_* at all lets lib/string.c supply everything. That
++ * also keeps UML's -Dstrrchr=kernel_strrchr renaming (see arch/um/Makefile)
++ * working, which is what stops the kernel's string functions from colliding with
++ * the libc that the UML binary is linked against.
++ */
++
++
++/*
++ * Against bionic, let libc supply these.
++ *
++ * The comment above explains why no __HAVE_ARCH_* is declared for a glibc
++ * build: arch/arm64/lib is not compiled for ARCH=um, so claiming the arch has
++ * its own would leave the symbols undefined. Against bionic the situation is
++ * the opposite -- libc.a certainly has them, and its objects get pulled in
++ * regardless because bionic's libc is coarser-grained than glibc's, so the
++ * kernel's copies in lib/string.c collide with libc's at static link time.
++ *
++ * Declaring them here stops lib/string.c compiling its own, which removes the
++ * collision at the source rather than renaming one side of it. Renaming is the
++ * wrong tool for this family in particular: CONFIG_FORTIFY_SOURCE redefines
++ * these names as macros, so a -Dstrchr=kernel_strchr fights the fortify
++ * wrappers and produces "call to undeclared library function 'strchr'".
++ */
++#ifdef __ANDROID__
++#define __HAVE_ARCH_MEMCPY
++#define __HAVE_ARCH_MEMSET
++#define __HAVE_ARCH_MEMMOVE
++#define __HAVE_ARCH_MEMCMP
++#define __HAVE_ARCH_MEMCHR
++#define __HAVE_ARCH_STRCMP
++#define __HAVE_ARCH_STRCPY
++#define __HAVE_ARCH_STRCHR
++#define __HAVE_ARCH_STRCHRNUL
++#define __HAVE_ARCH_STRLEN
++#define __HAVE_ARCH_STRNCMP
++#define __HAVE_ARCH_STRNLEN
++
++/*
++ * __HAVE_ARCH_* tells <linux/string.h> that the architecture declares these,
++ * so it stops declaring them itself. Here "the architecture" is libc, so
++ * declare them with the signatures libc uses and let the link resolve them
++ * there.
++ */
++void *memcpy(void *, const void *, __kernel_size_t);
++void *memset(void *, int, __kernel_size_t);
++void *memmove(void *, const void *, __kernel_size_t);
++int memcmp(const void *, const void *, __kernel_size_t);
++void *memchr(const void *, int, __kernel_size_t);
++int strcmp(const char *, const char *);
++char *strcpy(char *, const char *);
++char *strchr(const char *, int);
++char *strchrnul(const char *, int);
++__kernel_size_t strlen(const char *);
++int strncmp(const char *, const char *, __kernel_size_t);
++__kernel_size_t strnlen(const char *, __kernel_size_t);
++#endif
++
++#endif /* __UM_ARM64_STRING_H */
+diff -ruN linux-rc4-git/arch/arm64/um/asm/syscall.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/syscall.h
+--- a/arch/arm64/um/asm/syscall.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/syscall.h	2026-10-21 20:22:38
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_ARM64_SYSCALL_H
++#define __UM_ARM64_SYSCALL_H
++
++#include <asm/syscall-generic.h>
++#include <uapi/linux/audit.h>
++
++typedef asmlinkage long (*sys_call_ptr_t)(unsigned long, unsigned long,
++					  unsigned long, unsigned long,
++					  unsigned long, unsigned long);
++
++extern const sys_call_ptr_t sys_call_table[];
++
++static inline int syscall_get_arch(struct task_struct *task)
++{
++	return AUDIT_ARCH_AARCH64;
++}
++
++#endif /* __UM_ARM64_SYSCALL_H */
+diff -ruN linux-rc4-git/arch/arm64/um/asm/vm-flags.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/vm-flags.h
+--- a/arch/arm64/um/asm/vm-flags.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/vm-flags.h	2026-10-21 20:22:38
+@@ -0,0 +1,14 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __VM_FLAGS_ARM64_H
++#define __VM_FLAGS_ARM64_H
++
++/*
++ * Matches arch/arm64/include/asm/page.h: data mappings are executable only if
++ * the task's personality says so (READ_IMPLIES_EXEC), never unconditionally.
++ * The stack is left at the generic default, i.e. non-executable, which is the
++ * arm64 ABI -- x86-64 UML overrides it to executable, and copying that here
++ * would silently give every UML/arm64 guest an executable stack.
++ */
++#define VMA_DATA_DEFAULT_FLAGS	VMA_DATA_FLAGS_TSK_EXEC
++
++#endif
+diff -ruN linux-rc4-git/arch/arm64/um/asm/word-at-a-time.h /Users/irul/Kitchen/linux-um-arm64/arch/arm64/um/asm/word-at-a-time.h
+--- a/arch/arm64/um/asm/word-at-a-time.h	1970-01-01 07:00:00
++++ b/arch/arm64/um/asm/word-at-a-time.h	2026-10-21 20:22:38
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __UM_ARM64_WORD_AT_A_TIME_H
++#define __UM_ARM64_WORD_AT_A_TIME_H
++
++/*
++ * arch/arm64/include/asm/word-at-a-time.h wraps its unaligned load helpers in
++ * __mte_enable_tco_async()/__mte_disable_tco_async(), which flip PSTATE.TCO to
++ * suppress MTE tag checks. PSTATE.TCO is EL0-writable only when the system has
++ * MTE and the kernel has enabled it -- neither is true for a UML guest, which
++ * has no MTE at all (see arch/arm64/um/asm/mman.h).
++ *
++ * The generic implementation is a plain byte-wise scan and is correct
++ * everywhere; UML does not select DCACHE_WORD_ACCESS, so this is not on any hot
++ * path.
++ */
++#include <asm-generic/word-at-a-time.h>
++
++#endif
