@@ -34,8 +34,11 @@ if [ -z "$INIT" ]; then
 fi
 
 mkdir -p "$HERE/dist"
+mkdir -p "$(dirname -- "$OUT")"
 TMP="$HERE/dist/initramfs.cpio"
 python3 "$HERE/mkcpio.py" "$INIT" "$TMP"
-gzip -n -9 -f "$TMP"
-mv "$TMP.gz" "$OUT"
+# Stream the archive instead of gzipping in place and renaming: the default
+# OUT is $TMP.gz, so an unconditional mv would move the file onto itself.
+gzip -n -9 -c "$TMP" > "$OUT"
+rm -f "$TMP"
 echo "wrote $OUT"
