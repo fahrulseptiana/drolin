@@ -57,14 +57,21 @@ for spec in "null 1 3" "zero 1 5" "random 1 8" "urandom 1 9" "tty 5 0" "console 
     as_root mknod "$ROOT/dev/$1" c "$2" "$3" 2>/dev/null || as_root touch "$ROOT/dev/$1"
 done
 as_root cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
-printf '#!/bin/sh\nexit 101\n' > "$ROOT/usr/sbin/policy-rc.d"
+# The extracted tarball is root-owned, so a plain redirect would fail when the
+# build does not run as root; write through as_root instead.
+as_root tee "$ROOT/usr/sbin/policy-rc.d" >/dev/null <<'POLICY'
+#!/bin/sh
+exit 101
+POLICY
 as_root chmod 755 "$ROOT/usr/sbin/policy-rc.d"
 
 # Install systemd into the chroot. Its postinst calls
 # systemd-machine-id-setup, which reopens /etc/machine-id through
 # /proc/self/fd; /proc cannot be mounted in the common build container. Seed a
 # valid machine-id and neutralise that one command, then configure everything.
-printf '0123456789abcdef0123456789abcdef\n' > "$ROOT/etc/machine-id"
+as_root tee "$ROOT/etc/machine-id" >/dev/null <<'MACHINE'
+0123456789abcdef0123456789abcdef
+MACHINE
 as_root chmod 444 "$ROOT/etc/machine-id"
 apt_install() {
     as_root chroot "$ROOT" env DEBIAN_FRONTEND=noninteractive \
