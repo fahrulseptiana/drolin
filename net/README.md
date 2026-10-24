@@ -12,8 +12,7 @@ guest vec0  <--frames-->  UML vector fd  <--datagrams-->  drolin runtime
 
 UML's `fd` transport carries one Ethernet frame per datagram. passt speaks
 qemu's stream protocol, with each frame prefixed by a 4-byte big-endian length.
-The Rust runtime owns the socketpairs and the reframing pump; no `umnet`
-process is needed.
+The Rust runtime owns the socketpairs and the reframing pump.
 
 ## Build
 

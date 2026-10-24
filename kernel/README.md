@@ -28,14 +28,13 @@ The Rust engine does not assume either architecture: it probes the ELF header
 and validates it against the host at runtime.
 
 The minimal config enables `CONFIG_UML_NET_VECTOR=y`. It is compatible with
-`CONFIG_STATIC_LINK=y` because the arm64 patch removes the over-broad
+`CONFIG_STATIC_LINK=y` because the series removes the over-broad
 `select MAY_HAVE_RUNTIME_DEPS`; the vector `fd` transport does not resolve
 hostnames.
 
-The same fragment enables Docker's kernel requirements: PID and user
-namespaces, memory/pids cgroups, overlayfs, veth/bridge, and nftables plus
-legacy iptables NAT. Without those, `docker.service` is installed but cannot
-start.
+The same fragment enables what a container runtime needs inside the guest: PID
+and user namespaces, memory/pids cgroups, overlayfs, veth/bridge, and nftables
+plus legacy iptables NAT.
 
 ## Android
 

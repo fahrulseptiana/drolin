@@ -6,7 +6,7 @@ that share one engine:
 | project | language | responsibility |
 | --- | --- | --- |
 | `rust/` | Rust | planning, validation, host probes, image storage, process lifecycle, guest init |
-| `kernel/` | shell + Kconfig | pinned stable mainline source, arm64 UML patch, host and Android builds |
+| `kernel/` | shell + Kconfig | pinned stable mainline source, arm64 UML patch series, host and Android builds |
 | `android/` | Kotlin | Android app: UI, foreground service, packaged engine and Ubuntu image |
 
 The engine is the only place that knows what a boot is. The CLI and the Android
@@ -38,8 +38,8 @@ cargo run -p drolin-cli -- run \
 ```
 
 systemd is PID 1. You get a root bash shell through an autologin on the UML
-console. `uname -a` reports the pinned kernel version (`7.2.12-drolin`), and
-`systemctl status` is available.
+console. `uname -a` reports the pinned kernel version (`7.2.12`), and `systemctl
+status` is available.
 
 ## Networking
 
@@ -73,8 +73,8 @@ The APK bundles the bionic kernel, the standalone stub, a demo initramfs and
 the compressed Ubuntu image. The app boots it automatically on launch, expands
 the image once into app data, and hands the console to a vendored Termux
 terminal. `exit` or `poweroff` in the guest ends the session and stops the
-foreground service. The APK is signed with the debug key and is not a release
-artifact.
+foreground service. The APK is debug-signed, and tagged releases publish it as
+`drolin-<tag>-arm64-v8a-debug.apk`.
 
 ## Layout
 

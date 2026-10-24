@@ -10,8 +10,8 @@ Only the two terminal libraries are vendored, under
 
 Both libraries derive from Android Terminal Emulator and are Apache-2.0; see
 `LICENSE-TERMUX` in this directory. The app module is Apache-2.0 as a combined
-work; the Rust engine and kernel patch remain GPL-2.0-only and communicate with
-the app by exec, not by linking.
+work; the Rust engine and kernel patches remain GPL-2.0-only and communicate
+with the app by exec, not by linking.
 
 Local changes:
 * `com.termux.view.R` imports point at the app's `id.fahrul.drolin.R`, because this is

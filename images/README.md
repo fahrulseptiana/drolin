@@ -23,6 +23,6 @@ inspection.
 
 `build-ubuntu.sh` needs an arm64 Linux host or container and root/sudo because
 systemd is installed through a chroot. Cross-architecture APK builds consume
-the ext4 artifact produced by an arm64 job.
+the gzipped image produced on an arm64 job.
 
 Outputs go to `images/dist/`, which is ignored.

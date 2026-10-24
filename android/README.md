@@ -34,7 +34,7 @@ light activity theme. `libtermux.so` is compiled from `termux.c` by the build
 script.
 
 `GuestSession` owns the single `TerminalSession`. It sets `TMPDIR` to the app
-cache, passes `stub_exe=`, and starts the engine with `--inherit`, so UML's fd
+cache, passes `--stub-exe`, and starts the engine with `--inherit`, so UML's fd
 console is the Termux pty. The image's `/sbin/init` is systemd; the console
 getty autologs in root. `GuestService` is a foreground service so the guest
 survives the Activity going away; a finished session (shell exit or poweroff)
