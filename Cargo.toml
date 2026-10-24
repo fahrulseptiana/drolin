@@ -16,7 +16,7 @@ default-members = [
 version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-only"
-repository = "https://example.invalid/drolin"
+repository = "https://github.com/fahrulseptiana/drolin"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

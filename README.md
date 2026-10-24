@@ -92,3 +92,10 @@ docs/                 architecture and rationale
 Nothing built is committed: kernel trees, images, APKs, native libraries and
 cargo output are all ignored. See `docs/ARCHITECTURE.md` for the design and the
 platform constraints that shaped it.
+
+## License
+
+The engine, the build scripts and the patches are GPL-2.0-only; the Android app
+is Apache-2.0 because it is a combined work with the vendored Termux terminal.
+`LICENSING.md` maps every directory, and the sources fetched at build time
+(kernel, passt, Ubuntu base, Kotlin, Android SDK) keep their own licenses.
